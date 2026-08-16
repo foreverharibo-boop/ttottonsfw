@@ -44,10 +44,26 @@
     font-size: 0.85em;
 }
 
+/* 모바일에서 버튼 폭이 좁아져 글자가 세로로 쪼개지는 것 방지 */
+.ttotto-nsfw-settings .menu_button {
+    white-space: nowrap;
+    width: auto;
+    min-width: fit-content;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+}
+
 .ttotto-nsfw-settings .tns-tabs {
     display: flex;
     gap: 6px;
     margin: 8px 0;
+}
+
+.ttotto-nsfw-settings .tns-tab {
+    flex: 1 1 auto;
 }
 
 .ttotto-nsfw-settings .tns-tab.is-active {
@@ -206,4 +222,12 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+}
+
+.ttotto-nsfw-settings .tns-button-row .menu_button {
+    flex: 1 1 auto;
+}
+
+.ttotto-nsfw-settings .tns-section-head .menu_button {
+    flex-shrink: 0;
 }
