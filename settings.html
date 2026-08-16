@@ -1,0 +1,129 @@
+<div id="ttotto-nsfw-settings" class="ttotto-nsfw-settings">
+  <div class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header tns-drawer-header">
+      <div class="tns-heading">
+        <span aria-hidden="true">🔞</span>
+        <div>
+          <b>또또NSFW</b>
+          <small id="tns-header-status">장면을 지켜보는 중이에요</small>
+        </div>
+      </div>
+      <div class="tns-header-actions">
+        <label class="checkbox_label tns-master-label" title="또또NSFW 전체 사용">
+          <input id="tns-enabled" type="checkbox">
+          <span>사용</span>
+        </label>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+      </div>
+    </div>
+
+    <div class="inline-drawer-content">
+      <div id="tns-adult-warning" class="tns-adult-warning" hidden>
+        <strong>⚠️ 성인 캐릭터 전용 확장이에요.</strong>
+        <span>설정 탭에서 "모든 캐릭터는 성인입니다" 확인에 체크해야 동작해요.</span>
+      </div>
+
+      <div class="tns-tabs" role="tablist" aria-label="또또NSFW 메뉴">
+        <button id="tns-tab-state" class="menu_button tns-tab is-active" type="button" role="tab" aria-selected="true" data-tns-tab="state">장면 상태</button>
+        <button id="tns-tab-settings" class="menu_button tns-tab" type="button" role="tab" aria-selected="false" data-tns-tab="settings">설정</button>
+      </div>
+
+      <section id="tns-panel-state" class="tns-panel" role="tabpanel" aria-labelledby="tns-tab-state">
+        <div class="tns-section-head">
+          <div>
+            <strong>현재 장면 상태</strong>
+            <small id="tns-state-source">아직 기록 없음</small>
+          </div>
+          <button id="tns-toggle-preview" class="menu_button" type="button">주입문 보기</button>
+        </div>
+
+        <label class="tns-field" for="tns-state-location">
+          <span>장소</span>
+          <input id="tns-state-location" type="text" class="text_pole" placeholder="예: 침실 침대 위">
+        </label>
+
+        <div id="tns-char-list" class="tns-char-list"></div>
+        <div id="tns-char-empty" class="tns-empty" hidden>
+          <span aria-hidden="true">🛏️</span>
+          <span>추적된 인물 상태가 아직 없어요. 다음 AI 응답부터 자동으로 채워져요.</span>
+        </div>
+
+        <div class="tns-section-head tns-acts-head">
+          <div>
+            <strong>최근 전개 (반복 금지 목록)</strong>
+            <small id="tns-acts-summary">최근 3턴 기준</small>
+          </div>
+        </div>
+        <div id="tns-acts-list" class="tns-acts-list"></div>
+        <div id="tns-acts-empty" class="tns-empty" hidden>
+          <span aria-hidden="true">✨</span>
+          <span>기록된 전개가 없어요</span>
+        </div>
+
+        <div id="tns-prompt-preview" class="tns-prompt-preview" hidden>
+          <div class="tns-preview-head">
+            <strong>실제 주입 예정</strong>
+            <span id="tns-prompt-size" class="tns-count">0자</span>
+          </div>
+          <pre id="tns-prompt-text"></pre>
+        </div>
+
+        <div class="tns-button-row">
+          <button id="tns-refine" class="menu_button" type="button">
+            <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> 상태 다시 분석
+          </button>
+          <button id="tns-clear-state" class="menu_button" type="button">
+            <i class="fa-solid fa-broom" aria-hidden="true"></i> 기록 비우기
+          </button>
+        </div>
+      </section>
+
+      <section id="tns-panel-settings" class="tns-panel" role="tabpanel" aria-labelledby="tns-tab-settings" hidden>
+        <label class="tns-setting-row" for="tns-adult-confirmed">
+          <span>
+            <strong>모든 캐릭터는 성인입니다</strong>
+            <small>이 확인에 체크해야 확장이 동작해요 (만 18세 이상 캐릭터 전용)</small>
+          </span>
+          <input id="tns-adult-confirmed" type="checkbox">
+        </label>
+
+        <label class="tns-setting-row" for="tns-chat-enabled">
+          <span>
+            <strong>현재 채팅에서 사용</strong>
+            <small>채팅마다 따로 켜고 끌 수 있어요. NSFW 장면이 시작될 때 켜주세요.</small>
+          </span>
+          <input id="tns-chat-enabled" type="checkbox">
+        </label>
+
+        <div class="tns-field">
+          <span>반복 금지 범위 <b id="tns-repeat-window-value">3턴</b></span>
+          <input id="tns-repeat-window" type="range" min="1" max="10" step="1" value="3">
+          <small>최근 몇 턴의 전개를 "또 하지 마" 목록에 올릴지 정해요</small>
+        </div>
+
+        <label class="tns-field" for="tns-pace-mode">
+          <span>진행 속도</span>
+          <select id="tns-pace-mode" class="text_pole">
+            <option value="hold">지금 단계 유지 — 깊이만 더하기</option>
+            <option value="slow">자연스럽게 다음 단계로 (추천)</option>
+            <option value="push">적극적으로 진도 빼기</option>
+          </select>
+        </label>
+
+        <label class="tns-setting-row" for="tns-auto-refine">
+          <span>
+            <strong>태그 누락 시 자동 보정</strong>
+            <small>AI가 상태 태그를 빼먹으면 보조 AI 호출로 상태를 다시 잡아요 (호출 비용 발생)</small>
+          </span>
+          <input id="tns-auto-refine" type="checkbox">
+        </label>
+
+        <label class="tns-field" for="tns-refine-profile">
+          <span>보정 분석 연결 프로필</span>
+          <select id="tns-refine-profile" class="text_pole"></select>
+          <small>상태 보정 분석에만 쓰는 연결이에요. 저렴한 모델을 추천해요.</small>
+        </label>
+      </section>
+    </div>
+  </div>
+</div>
