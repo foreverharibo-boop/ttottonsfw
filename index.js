@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.1.2';
+const EXTENSION_VERSION = '0.1.3';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -28,6 +28,9 @@ const PACE_INSTRUCTIONS = Object.freeze({
     push: 'Actively escalate. Each response must clearly progress the scene beyond where the previous one ended.',
 });
 
+// 실질적 무제한 — 잘림 방지용 안전 상한만 백만으로 걸어둔다
+const SAFETY_LIMIT = 1000000;
+
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     adultConfirmed: false,
@@ -35,7 +38,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     paceMode: 'slow',
     autoRefine: true,
     refineProfileId: '',
-    refineMaxTokens: 700,
+    refineMaxTokens: SAFETY_LIMIT,
     refineContextMessages: 8,
 });
 
@@ -66,6 +69,8 @@ function getSettings() {
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         if (settings[key] === undefined) settings[key] = structuredClone(value);
     }
+    // 구버전(700토큰 상한) 설정 마이그레이션 — 잘림 방지
+    if (Number(settings.refineMaxTokens) < SAFETY_LIMIT) settings.refineMaxTokens = SAFETY_LIMIT;
     return settings;
 }
 
@@ -102,18 +107,18 @@ function isArmed() {
 function sanitizeState(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const clean = { location: '', characters: {}, acts: [] };
-    clean.location = String(raw.location ?? '').slice(0, 200);
+    clean.location = String(raw.location ?? '').slice(0, SAFETY_LIMIT);
     const characters = raw.characters && typeof raw.characters === 'object' ? raw.characters : {};
-    for (const [name, info] of Object.entries(characters).slice(0, 8)) {
+    for (const [name, info] of Object.entries(characters).slice(0, 64)) {
         if (!name || typeof info !== 'object' || info === null) continue;
-        clean.characters[String(name).slice(0, 60)] = {
-            clothing: String(info.clothing ?? '').slice(0, 300),
-            position: String(info.position ?? '').slice(0, 300),
-            contact: String(info.contact ?? '').slice(0, 300),
+        clean.characters[String(name).slice(0, SAFETY_LIMIT)] = {
+            clothing: String(info.clothing ?? '').slice(0, SAFETY_LIMIT),
+            position: String(info.position ?? '').slice(0, SAFETY_LIMIT),
+            contact: String(info.contact ?? '').slice(0, SAFETY_LIMIT),
         };
     }
     const acts = Array.isArray(raw.acts) ? raw.acts : [];
-    clean.acts = acts.map((act) => String(act ?? '').trim().slice(0, 80)).filter(Boolean).slice(0, 8);
+    clean.acts = acts.map((act) => String(act ?? '').trim().slice(0, SAFETY_LIMIT)).filter(Boolean).slice(0, 64);
     if (!clean.location && !Object.keys(clean.characters).length && !clean.acts.length) return null;
     return clean;
 }
@@ -328,7 +333,7 @@ function buildRefineInput() {
     return recent.map((message) => {
         const role = message.is_user ? 'USER' : 'CHARACTER';
         const name = String(message.name ?? '');
-        const text = stripStateTag(message.mes).slice(0, 1600);
+        const text = stripStateTag(message.mes).slice(0, SAFETY_LIMIT);
         return `[${role} | ${name}]\n${text}`;
     }).join('\n\n');
 }
