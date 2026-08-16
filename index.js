@@ -7,12 +7,13 @@
 //  3) 태그가 누락되면(또는 수동 버튼) 보조 AI 호출로 최근 대화를 분석해 상태를 보정
 
 const MODULE_NAME = 'ttotto-nsfw';
-const EXTENSION_PATH = 'third-party/ttotto-nsfw';
+// 설치된 폴더 이름이 무엇이든 동작하도록, 템플릿은 모듈 URL 기준으로 직접 불러온다.
+const EXTENSION_BASE_URL = new URL('.', import.meta.url);
 const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.1.0';
+const EXTENSION_VERSION = '0.1.1';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -709,11 +710,21 @@ function bindUi() {
     });
 }
 
+async function loadSettingsHtml() {
+    const response = await fetch(new URL('settings.html', EXTENSION_BASE_URL));
+    if (!response.ok) throw new Error(`settings.html 로드 실패 (HTTP ${response.status})`);
+    return response.text();
+}
+
 async function initializeUi() {
-    const context = getContext();
-    const html = await context.renderExtensionTemplateAsync(EXTENSION_PATH, 'settings');
+    if (document.getElementById('ttotto-nsfw-settings')) return; // 중복 삽입 방지
+    const html = await loadSettingsHtml();
     const container = document.getElementById('extensions_settings2') ?? document.getElementById('extensions_settings');
+    if (!container) throw new Error('확장 설정 컨테이너를 찾을 수 없습니다.');
     container.insertAdjacentHTML('beforeend', html);
+    const required = ['tns-enabled', 'tns-adult-confirmed', 'tns-chat-enabled', 'tns-repeat-window', 'tns-pace-mode', 'tns-refine', 'tns-state-location'];
+    const missing = required.filter((id) => !document.getElementById(id));
+    if (missing.length) throw new Error(`설정 패널 요소 누락: ${missing.join(', ')}`);
     uiReady = true;
     bindUi();
     populateProfiles();
