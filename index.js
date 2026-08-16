@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.3.1';
+const EXTENSION_VERSION = '0.4.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -38,7 +38,7 @@ const AUTO_ARM_OFF = 2;
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     adultConfirmed: false,
-    armMode: 'manual', // 'manual' = 채팅 토글로 직접, 'auto' = 장면 온도 감지로 자동
+    armMode: 'auto', // 'auto' = 장면 온도 감지로 NSFW에서만 개입(기본), 'manual' = 채팅 토글로 직접
     nextBeatHints: true,
     repeatWindow: 3,
     maxBannedActs: 15, // 반복 금지 목록 총량 상한 — 넘치면 오래된 것부터 제외
