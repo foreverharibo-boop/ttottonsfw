@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.2.0';
+const EXTENSION_VERSION = '0.3.1';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -41,6 +41,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     armMode: 'manual', // 'manual' = 채팅 토글로 직접, 'auto' = 장면 온도 감지로 자동
     nextBeatHints: true,
     repeatWindow: 3,
+    maxBannedActs: 15, // 반복 금지 목록 총량 상한 — 넘치면 오래된 것부터 제외
     paceMode: 'slow',
     autoRefine: true,
     refineProfileId: '',
@@ -118,27 +119,53 @@ function isFullyArmed() {
 }
 
 // ───────────────────────── 상태 스냅샷 ─────────────────────────
+// 값은 이중 언어로 저장: 주입은 영어(en), UI 표시는 한국어(ko).
+// 태그에는 "English phrase || 한국어 구" 형식으로 오고, 구버전 데이터(단일 문자열)도 호환.
+
+function toBi(value) {
+    if (value && typeof value === 'object') {
+        return { en: String(value.en ?? '').trim().slice(0, SAFETY_LIMIT), ko: String(value.ko ?? '').trim().slice(0, SAFETY_LIMIT) };
+    }
+    const raw = String(value ?? '').trim().slice(0, SAFETY_LIMIT);
+    if (!raw) return { en: '', ko: '' };
+    const parts = raw.split(/\s*\|\|\s*/);
+    if (parts.length >= 2 && parts[0].trim() && parts[1].trim()) {
+        return { en: parts[0].trim(), ko: parts.slice(1).join(' ').trim() };
+    }
+    return { en: raw, ko: raw };
+}
+
+function biText(bi, lang = 'ko') {
+    if (!bi) return '';
+    if (typeof bi === 'string') return bi;
+    return bi[lang] || bi[lang === 'en' ? 'ko' : 'en'] || '';
+}
+
+function hasBi(bi) {
+    return Boolean(biText(bi, 'en') || biText(bi, 'ko'));
+}
 
 function sanitizeState(raw) {
     if (!raw || typeof raw !== 'object') return null;
-    const clean = { location: '', characters: {}, acts: [] };
-    clean.location = String(raw.location ?? '').slice(0, SAFETY_LIMIT);
+    const clean = { location: { en: '', ko: '' }, characters: {}, acts: [] };
+    clean.location = toBi(raw.location);
     const characters = raw.characters && typeof raw.characters === 'object' ? raw.characters : {};
     for (const [name, info] of Object.entries(characters).slice(0, 64)) {
         if (!name || typeof info !== 'object' || info === null) continue;
         clean.characters[String(name).slice(0, SAFETY_LIMIT)] = {
-            clothing: String(info.clothing ?? '').slice(0, SAFETY_LIMIT),
-            position: String(info.position ?? '').slice(0, SAFETY_LIMIT),
-            contact: String(info.contact ?? '').slice(0, SAFETY_LIMIT),
+            clothing: toBi(info.clothing),
+            position: toBi(info.position),
+            contact: toBi(info.contact),
         };
     }
     const acts = Array.isArray(raw.acts) ? raw.acts : [];
-    clean.acts = acts.map((act) => String(act ?? '').trim().slice(0, SAFETY_LIMIT)).filter(Boolean).slice(0, 64);
+    clean.acts = acts.map(toBi).filter(hasBi).slice(0, 64);
     const heat = Number(raw.heat);
     clean.heat = Number.isFinite(heat) ? Math.max(0, Math.min(10, Math.round(heat))) : null;
     const next = Array.isArray(raw.next) ? raw.next : [];
-    clean.next = next.map((beat) => String(beat ?? '').trim().slice(0, SAFETY_LIMIT)).filter(Boolean).slice(0, 8);
-    if (!clean.location && !Object.keys(clean.characters).length && !clean.acts.length && clean.heat === null && !clean.next.length) return null;
+    clean.next = next.map(toBi).filter(hasBi).slice(0, 8);
+    const hasCharacters = Object.values(clean.characters).some((info) => hasBi(info.clothing) || hasBi(info.position) || hasBi(info.contact));
+    if (!hasBi(clean.location) && !hasCharacters && !clean.acts.length && clean.heat === null && !clean.next.length) return null;
     return clean;
 }
 
@@ -249,31 +276,60 @@ function effectiveState() {
     return { state: null, source: 'none' };
 }
 
-// 최근 N턴의 전개(행위) 목록 — 오래된 것 → 최신 순
-function recentActs(windowSize) {
+function ignoredActSet() {
     const meta = getChatMeta(false);
-    const ignored = new Set((meta?.ignoredActs ?? []).map((act) => act.toLocaleLowerCase()));
+    return new Set((meta?.ignoredActs ?? []).map((act) => String(act).toLocaleLowerCase()));
+}
+
+function isActIgnored(act, ignored) {
+    return ignored.has(biText(act, 'en').toLocaleLowerCase()) || ignored.has(biText(act, 'ko').toLocaleLowerCase());
+}
+
+// 최근 N턴의 전개(행위) 목록 — 오래된 것 → 최신 순.
+// 총량이 maxBannedActs를 넘으면 오래된 것부터 잘라서 주입문 비대화를 막는다.
+function recentActs(windowSize) {
+    const ignored = ignoredActSet();
     const messages = assistantMessages();
     const rows = [];
     for (let i = messages.length - 1; i >= 0 && rows.length < windowSize; i--) {
         const snapshot = snapshotForMessage(messages[i]);
         if (!snapshot?.state?.acts?.length) continue;
-        const acts = snapshot.state.acts.filter((act) => !ignored.has(act.toLocaleLowerCase()));
+        const acts = snapshot.state.acts.filter((act) => !isActIgnored(act, ignored));
         if (acts.length) rows.unshift({ turnsAgo: rows.length + 1, acts });
     }
-    return rows;
+    // 중복 제거 (같은 전개가 여러 턴에 반복 기록된 경우 최신 것만)
+    const seen = new Set();
+    for (let i = rows.length - 1; i >= 0; i--) {
+        rows[i].acts = rows[i].acts.filter((act) => {
+            const key = (biText(act, 'en') || biText(act, 'ko')).toLocaleLowerCase();
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    }
+    // 총량 상한: 오래된 것부터 제거
+    const max = Math.max(3, Number(getSettings().maxBannedActs) || DEFAULT_SETTINGS.maxBannedActs);
+    let total = rows.reduce((sum, row) => sum + row.acts.length, 0);
+    while (total > max && rows.length) {
+        const first = rows[0];
+        const drop = Math.min(first.acts.length, total - max);
+        first.acts = first.acts.slice(drop);
+        total -= drop;
+        if (!first.acts.length) rows.shift();
+    }
+    return rows.filter((row) => row.acts.length);
 }
 
 // ───────────────────────── 주입문 생성 ─────────────────────────
 
 function buildStateLines(state) {
     const lines = [];
-    if (state.location) lines.push(`- Location: ${state.location}`);
+    if (hasBi(state.location)) lines.push(`- Location: ${biText(state.location, 'en')}`);
     for (const [name, info] of Object.entries(state.characters)) {
         const parts = [];
-        if (info.clothing) parts.push(`clothing: ${info.clothing}`);
-        if (info.position) parts.push(`position/posture: ${info.position}`);
-        if (info.contact) parts.push(`physical contact: ${info.contact}`);
+        if (hasBi(info.clothing)) parts.push(`clothing: ${biText(info.clothing, 'en')}`);
+        if (hasBi(info.position)) parts.push(`position/posture: ${biText(info.position, 'en')}`);
+        if (hasBi(info.contact)) parts.push(`physical contact: ${biText(info.contact, 'en')}`);
         if (parts.length) lines.push(`- ${name} — ${parts.join('; ')}`);
     }
     return lines;
@@ -281,35 +337,44 @@ function buildStateLines(state) {
 
 // 최신 스냅샷의 다음 전개 후보 (반복 금지 목록·무시 목록과 겹치는 건 제외)
 function nextBeatCandidates() {
-    const meta = getChatMeta(false);
-    const ignored = new Set((meta?.ignoredActs ?? []).map((act) => act.toLocaleLowerCase()));
+    const ignored = ignoredActSet();
     const { state } = effectiveState();
     if (!state?.next?.length) return [];
     const settings = getSettings();
     const banned = new Set(
         recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow)
             .flatMap((row) => row.acts)
-            .map((act) => act.toLocaleLowerCase()),
+            .flatMap((act) => [biText(act, 'en').toLocaleLowerCase(), biText(act, 'ko').toLocaleLowerCase()])
+            .filter(Boolean),
     );
     return state.next.filter((beat) => {
-        const key = beat.toLocaleLowerCase();
-        return !ignored.has(key) && !banned.has(key);
+        if (isActIgnored(beat, ignored)) return false;
+        return !banned.has(biText(beat, 'en').toLocaleLowerCase()) && !banned.has(biText(beat, 'ko').toLocaleLowerCase());
     });
 }
 
 const STATE_REPORT_LINES = [
-    'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON, Korean values). It is machine-read and hidden from the reader — include it every time:',
-    '<scene_state>{"location":"현재 장소","characters":{"이름":{"clothing":"현재 복장 상태","position":"현재 자세·위치","contact":"현재 신체 접촉"}},"acts":["이번 응답에서 새로 일어난 전개·행위 2~5개, 짧은 한국어 구"],"heat":0,"next":["다음에 이어질 만한 새로운 전개 후보 2~3개, 짧은 한국어 구"]}</scene_state>',
-    '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). Update every field to reflect the situation at the END of your response. List only beats that are new in this response under "acts". "next" must not repeat anything from "acts".',
+    'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
+    '<scene_state>{"location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
+    'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
+    '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
+    '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
+];
+
+// 감시 모드 전용 초경량 주입 — 장면 온도 한 줄만 요청 (SFW 장면에는 개입하지 않음)
+const MONITOR_REPORT_LINES = [
+    '[Scene Monitor] End your response with exactly one line in this format. It is machine-read and hidden from the reader — include it every time, and change nothing else about how you write:',
+    '<scene_state>{"heat":0}</scene_state>',
+    '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). Report it factually. Do not mention this line in your prose.',
 ];
 
 function buildInjection() {
     const settings = getSettings();
     const { state } = effectiveState();
 
-    // 온도 자동 모드에서 아직 무장 전: 상태 태그만 조용히 수집 (감시 주입)
+    // 온도 자동 모드에서 아직 무장 전: 온도만 조용히 수집, 본문에는 일절 개입하지 않음
     if (!isFullyArmed()) {
-        return ['[Scene Monitor]', ...STATE_REPORT_LINES].join('\n');
+        return MONITOR_REPORT_LINES.join('\n');
     }
 
     const actRows = recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow);
@@ -331,7 +396,7 @@ function buildInjection() {
         sections.push(
             '',
             `ALREADY HAPPENED in the last ${actRows.length} response(s) — do NOT repeat these beats, actions, or their near-identical variations:`,
-            ...actRows.map((row) => `- ${row.acts.join(', ')}`),
+            ...actRows.map((row) => `- ${row.acts.map((act) => biText(act, 'en')).join(', ')}`),
             'Repeating a listed beat with different wording still counts as repetition. Bring something new.',
         );
     }
@@ -341,7 +406,7 @@ function buildInjection() {
         if (beats.length) {
             sections.push(
                 '',
-                `SUGGESTED NEXT BEATS (pick one, or do something even better — never fall back to a banned beat): ${beats.join(' / ')}`,
+                `SUGGESTED NEXT BEATS (pick one, or do something even better — never fall back to a banned beat): ${beats.map((beat) => biText(beat, 'en')).join(' / ')}`,
             );
         }
     }
@@ -392,7 +457,7 @@ function buildRefineInput() {
 }
 
 function refinePromptMessages() {
-    const system = 'You are a scene-state tracker for an adult fiction roleplay log. All characters are adults. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.\n\nSchema:\n{"location":"current location, short Korean phrase","characters":{"name":{"clothing":"current clothing state, Korean","position":"current posture/position, Korean","contact":"current physical contact, Korean"}},"acts":["2-5 short Korean phrases naming the beats/actions that occurred in the most recent CHARACTER message only"],"heat":0,"next":["2-3 short Korean phrases suggesting fresh beats the scene could move to next"]}\n\nRules:\n- Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.\n- "acts" must cover only the final CHARACTER message, not the whole log.\n- "heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday) to 10 (peak).\n- "next" must not repeat anything already listed in "acts".\n- Include every present character. Use the exact names from the log.\n- If something is unknown, use an empty string. Return the JSON object only.';
+    const system = 'You are a scene-state tracker for an adult fiction roleplay log. All characters are adults. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.\n\nSchema:\n{"location":"short English phrase || 짧은 한국어 구","characters":{"name":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant beats from the most recent CHARACTER message only, each \'English || 한국어\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}\n\nRules:\n- Every string value is a bilingual pair: concise English first, then " || ", then natural Korean.\n- Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.\n- "acts" must cover only the final CHARACTER message. List ONLY substantive beats (physical/romantic/emotional developments); skip mundane logistics like snacks, drinks, blankets, or remote controls.\n- "heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday) to 10 (peak).\n- "next" must not repeat anything already listed in "acts".\n- Include every present character. Use the exact names from the log.\n- If something is unknown, use an empty string. Return the JSON object only.';
     const user = `Log excerpt (oldest first):\n\n${buildRefineInput()}`;
     return [
         { role: 'system', content: system },
@@ -526,6 +591,11 @@ function handleIncomingMessage(index) {
             meta.autoArmed = true;
             saveChatMeta();
             toastr.info(`장면 온도 ${state.heat}/10 — 연속성 개입을 시작해요.`, '🔞또또NSFW');
+            // 감시 모드에서는 온도만 수집했으므로, 무장 직후 보조 AI로 전체 상태를 백필
+            if (settings.autoRefine) {
+                clearTimeout(refineTimer);
+                refineTimer = setTimeout(() => { void runRefine(); }, 400);
+            }
         } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF) {
             meta.autoArmed = false;
             saveChatMeta();
@@ -617,7 +687,7 @@ function renderStatePanel() {
     }
 
     const locationInput = element('tns-state-location');
-    if (document.activeElement !== locationInput) locationInput.value = state?.location ?? '';
+    if (document.activeElement !== locationInput) locationInput.value = biText(state?.location);
 
     const list = element('tns-char-list');
     list.replaceChildren();
@@ -636,7 +706,7 @@ function renderStatePanel() {
             const input = document.createElement('input');
             input.type = 'text';
             input.className = 'text_pole';
-            input.value = info[field] ?? '';
+            input.value = biText(info[field]);
             input.addEventListener('change', () => {
                 applyManualEdit((draft) => {
                     if (!draft.characters[name]) draft.characters[name] = { clothing: '', position: '', contact: '' };
@@ -658,14 +728,16 @@ function renderStatePanel() {
             const chip = document.createElement('span');
             chip.className = 'tns-act-chip';
             const text = document.createElement('span');
-            text.textContent = act;
+            text.textContent = biText(act);
             const remove = document.createElement('button');
             remove.type = 'button';
             remove.title = '이 항목은 반복 금지에서 제외';
             remove.textContent = '×';
             remove.addEventListener('click', () => {
                 const meta = getChatMeta();
-                if (!meta.ignoredActs.includes(act)) meta.ignoredActs.push(act);
+                for (const key of [biText(act, 'en'), biText(act, 'ko')]) {
+                    if (key && !meta.ignoredActs.includes(key)) meta.ignoredActs.push(key);
+                }
                 saveChatMeta();
                 updateUi();
             });
@@ -684,14 +756,16 @@ function renderStatePanel() {
         const chip = document.createElement('span');
         chip.className = 'tns-act-chip tns-next-chip';
         const text = document.createElement('span');
-        text.textContent = beat;
+        text.textContent = biText(beat);
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.title = '이 후보는 제안에서 제외';
         remove.textContent = '×';
         remove.addEventListener('click', () => {
             const meta = getChatMeta();
-            if (!meta.ignoredActs.includes(beat)) meta.ignoredActs.push(beat);
+            for (const key of [biText(beat, 'en'), biText(beat, 'ko')]) {
+                if (key && !meta.ignoredActs.includes(key)) meta.ignoredActs.push(key);
+            }
             saveChatMeta();
             updateUi();
         });
@@ -714,6 +788,8 @@ function updateUi() {
         element('tns-chat-enabled').checked = Boolean(meta?.enabled);
         element('tns-repeat-window').value = String(settings.repeatWindow);
         element('tns-repeat-window-value').textContent = `${settings.repeatWindow}턴`;
+        element('tns-max-banned').value = String(settings.maxBannedActs);
+        element('tns-max-banned-value').textContent = `${settings.maxBannedActs}개`;
         element('tns-pace-mode').value = String(settings.paceMode);
         element('tns-arm-mode').value = String(settings.armMode);
         element('tns-next-hints').checked = Boolean(settings.nextBeatHints);
@@ -789,6 +865,17 @@ function bindUi() {
     slider.addEventListener('change', () => {
         const settings = getSettings();
         settings.repeatWindow = Math.min(10, Math.max(1, Number(slider.value) || DEFAULT_SETTINGS.repeatWindow));
+        saveSettings();
+        updateUi();
+    });
+
+    const maxBannedSlider = element('tns-max-banned');
+    maxBannedSlider.addEventListener('input', () => {
+        element('tns-max-banned-value').textContent = `${maxBannedSlider.value}개`;
+    });
+    maxBannedSlider.addEventListener('change', () => {
+        const settings = getSettings();
+        settings.maxBannedActs = Math.min(30, Math.max(5, Number(maxBannedSlider.value) || DEFAULT_SETTINGS.maxBannedActs));
         saveSettings();
         updateUi();
     });

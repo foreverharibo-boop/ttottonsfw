@@ -113,9 +113,9 @@
           <span>개입 방식</span>
           <select id="tns-arm-mode" class="text_pole">
             <option value="manual">수동 — 위 채팅 토글을 켜면 바로 개입</option>
-            <option value="auto">온도 자동 — 장면이 달아오르면(5↑) 개입, 식으면(2↓) 해제</option>
+            <option value="auto">온도 자동 (NSFW 전용 추천) — 달아오르면(5↑) 개입, 식으면(2↓) 해제</option>
           </select>
-          <small>자동 모드에서는 평소엔 장면 온도만 조용히 지켜봐요. 채팅 토글은 켜져 있어야 해요.</small>
+          <small>자동 모드의 평소 상태는 초경량이에요: 온도 확인용 한 줄만 요청하고 본문에는 일절 개입하지 않아요. 개입이 시작되는 순간 보조 AI가 장면 상태를 즉시 채워요. 채팅 토글은 켜져 있어야 해요.</small>
         </label>
 
         <label class="tns-setting-row" for="tns-next-hints">
@@ -130,6 +130,12 @@
           <span>반복 금지 범위 <b id="tns-repeat-window-value">3턴</b></span>
           <input id="tns-repeat-window" type="range" min="1" max="10" step="1" value="3">
           <small>최근 몇 턴의 전개를 "또 하지 마" 목록에 올릴지 정해요</small>
+        </div>
+
+        <div class="tns-field">
+          <span>반복 금지 최대 개수 <b id="tns-max-banned-value">15개</b></span>
+          <input id="tns-max-banned" type="range" min="5" max="30" step="1" value="15">
+          <small>목록이 이 개수를 넘으면 오래된 전개부터 자동으로 빠져요. 주입문이 너무 길어지는 걸 막아줘요.</small>
         </div>
 
         <label class="tns-field" for="tns-pace-mode">
