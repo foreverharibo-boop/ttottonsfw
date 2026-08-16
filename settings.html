@@ -112,10 +112,26 @@
         <label class="tns-field" for="tns-arm-mode">
           <span>개입 방식</span>
           <select id="tns-arm-mode" class="text_pole">
+            <option value="stealth">스텔스 자동 (추천) — SFW에선 주입 제로, NSFW 신호를 로컬로 감지해 개입</option>
+            <option value="auto">온도 자동 — 매턴 온도 한 줄을 요청해 감시, 달아오르면(5↑) 개입</option>
             <option value="manual">수동 — 위 채팅 토글을 켜면 바로 개입</option>
-            <option value="auto">온도 자동 (NSFW 전용 추천) — 달아오르면(5↑) 개입, 식으면(2↓) 해제</option>
           </select>
-          <small>자동 모드의 평소 상태는 초경량이에요: 온도 확인용 한 줄만 요청하고 본문에는 일절 개입하지 않아요. 개입이 시작되는 순간 보조 AI가 장면 상태를 즉시 채워요. 채팅 토글은 켜져 있어야 해요.</small>
+          <small>스텔스는 일상 장면에 주입·호출·흔적이 전혀 없어요. 확장이 브라우저에서 최근 메시지를 직접 스캔하다가 NSFW 신호가 기준을 넘으면 개입하고, 장면이 식으면(온도 2↓) 다시 침묵해요. 개입 시작 순간 보조 AI가 장면 상태를 즉시 채워요.</small>
+        </label>
+
+        <label class="tns-field" for="tns-stealth-sensitivity">
+          <span>스텔스 감지 민감도</span>
+          <select id="tns-stealth-sensitivity" class="text_pole">
+            <option value="high">민감 — 분위기만 잡혀도 빨리 개입</option>
+            <option value="normal">보통 (추천)</option>
+            <option value="low">둔감 — 확실해질 때만 개입</option>
+          </select>
+        </label>
+
+        <label class="tns-field" for="tns-stealth-keywords">
+          <span>스텔스 감지 키워드 추가</span>
+          <input id="tns-stealth-keywords" type="text" class="text_pole" placeholder="쉼표로 구분 (예: 단어1, 단어2)">
+          <small>내 롤플레이에서 자주 쓰는 신호 표현을 추가하면 감지가 정확해져요</small>
         </label>
 
         <label class="tns-setting-row" for="tns-next-hints">

@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.4.0';
+const EXTENSION_VERSION = '0.5.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -35,10 +35,27 @@ const SAFETY_LIMIT = 1000000;
 const AUTO_ARM_ON = 5;
 const AUTO_ARM_OFF = 2;
 
+// 스텔스 모드 로컬 감지: 최근 메시지에서 NSFW 신호를 점수화 (주입·호출 없음)
+const STEALTH_WINDOW = 4; // 최근 몇 개 메시지를 스캔할지
+const STEALTH_THRESHOLDS = Object.freeze({ high: 4, normal: 6, low: 9 });
+const STEALTH_LEXICON = [
+    // 강한 신호 (3점): 명시적 행위·신체
+    { re: /삽입|절정|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|안에\s*들어오|안을\s*채우|몸\s*안에|하나가\s*되|thrust(?:ing|s)?|orgasm|climax|cock|pussy|nipple|entrance|inside\s+her|inside\s+him/gi, w: 3 },
+    // 신음 표기 (3점)
+    { re: /하앙|흐응|아앙|으응|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, w: 3 },
+    // 중간 신호 (2점): 탈의·밀착·애무
+    { re: /벗기|벗겨|탈의|알몸|나체|속옷|브래지어|팬티|지퍼를\s*내리|단추를\s*풀|신음|헐떡|핥|빨아|깨물|침대에\s*눕히|다리\s*사이|허벅지\s*안쪽|가슴을\s*움켜|가슴을\s*쓸|몸을\s*겹치|밀어\s*넘어뜨리|undress|strip(?:ped|ping)?|naked|underwear|lick(?:ed|ing|s)?|suck(?:ed|ing|s)?|grind(?:ed|ing|s)?|straddl(?:e|ed|ing)|between\s+(?:her|his)\s+thighs/gi, w: 2 },
+    // 약한 신호 (1점): 달아오르는 분위기
+    { re: /키스가\s*깊어|입술을\s*탐|혀가\s*얽|숨이\s*가빠|숨이\s*거칠|달아오|몸이\s*뜨거|열기가\s*번지|목덜미에\s*입|귓불을|허리를\s*끌어당|kiss\s+deepen|breath(?:ing)?\s+(?:hitch|ragged|heavy)|heat\s+pool|shiver(?:ed|ing)?\s+under/gi, w: 1 },
+];
+
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     adultConfirmed: false,
-    armMode: 'auto', // 'auto' = 장면 온도 감지로 NSFW에서만 개입(기본), 'manual' = 채팅 토글로 직접
+    // 'stealth' = 로컬 감지, SFW에선 주입 제로(기본) / 'auto' = 온도 태그 감시 / 'manual' = 채팅 토글로 직접
+    armMode: 'stealth',
+    stealthSensitivity: 'normal', // 'high' | 'normal' | 'low'
+    stealthKeywords: '', // 쉼표 구분 커스텀 감지 키워드 (각 3점)
     nextBeatHints: true,
     repeatWindow: 3,
     maxBannedActs: 15, // 반복 금지 목록 총량 상한 — 넘치면 오래된 것부터 제외
@@ -114,8 +131,58 @@ function isSupervising() {
 function isFullyArmed() {
     if (!isSupervising()) return false;
     const settings = getSettings();
-    if (settings.armMode !== 'auto') return true;
+    if (settings.armMode === 'manual') return true;
     return Boolean(getChatMeta(false)?.autoArmed);
+}
+
+// ───────────────────────── 스텔스 로컬 감지 ─────────────────────────
+
+function nsfwScore(text) {
+    const source = String(text ?? '');
+    if (!source) return 0;
+    let score = 0;
+    for (const { re, w } of STEALTH_LEXICON) {
+        re.lastIndex = 0;
+        let count = 0;
+        while (count < 3 && re.exec(source) !== null) count++;
+        score += count * w;
+    }
+    const custom = String(getSettings().stealthKeywords ?? '').split(',').map((k) => k.trim()).filter(Boolean);
+    for (const keyword of custom) {
+        if (source.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) score += 3;
+    }
+    return score;
+}
+
+function stealthWindowScore() {
+    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+    // 해제 직후 직전 장면의 잔열로 곧바로 재무장하는 것 방지: 쿨다운 마커 이후 메시지만 스캔
+    const from = Number(getChatMeta(false)?.stealthCooldownFrom ?? 0);
+    const recent = chat
+        .map((message, index) => ({ message, index }))
+        .filter(({ message, index }) => message && !message.is_system && index >= from)
+        .slice(-STEALTH_WINDOW);
+    return recent.reduce((sum, { message }) => sum + nsfwScore(stripStateTag(message.mes)), 0);
+}
+
+// 스텔스 모드에서 NSFW 신호가 기준을 넘으면 무장. 주입도 호출도 없이 로컬 스캔만 사용.
+function maybeStealthArm() {
+    const settings = getSettings();
+    if (settings.armMode !== 'stealth' || !isSupervising()) return false;
+    const meta = getChatMeta(false);
+    if (!meta || meta.autoArmed) return false;
+    const threshold = STEALTH_THRESHOLDS[settings.stealthSensitivity] ?? STEALTH_THRESHOLDS.normal;
+    const score = stealthWindowScore();
+    if (score < threshold) return false;
+    meta.autoArmed = true;
+    saveChatMeta();
+    toastr.info(`NSFW 신호 감지 (점수 ${score}) — 연속성 개입을 시작해요.`, '🔞또또NSFW');
+    if (settings.autoRefine) {
+        clearTimeout(refineTimer);
+        refineTimer = setTimeout(() => { void runRefine(); }, 400);
+    }
+    updateUi();
+    return true;
 }
 
 // ───────────────────────── 상태 스냅샷 ─────────────────────────
@@ -372,8 +439,9 @@ function buildInjection() {
     const settings = getSettings();
     const { state } = effectiveState();
 
-    // 온도 자동 모드에서 아직 무장 전: 온도만 조용히 수집, 본문에는 일절 개입하지 않음
+    // 무장 전: 스텔스 모드는 아예 아무것도 주입하지 않고, 온도 감시 모드는 온도 한 줄만 요청
     if (!isFullyArmed()) {
+        if (settings.armMode === 'stealth') return '';
         return MONITOR_REPORT_LINES.join('\n');
     }
 
@@ -430,6 +498,7 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
     try {
         if (!isSupervising()) return;
         if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) return;
+        maybeStealthArm(); // 방금 보낸 유저 메시지까지 반영해 생성 직전에 감지
         const prompt = buildInjection();
         if (!prompt) return;
         getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
@@ -537,7 +606,8 @@ async function runRefine({ manual = false } = {}) {
 
 function scheduleAutoRefine() {
     const settings = getSettings();
-    if (!settings.autoRefine || !isSupervising()) return;
+    // 무장 상태에서만 자동 보정 — 대기(스텔스/감시) 중 태그가 없는 건 정상이므로 호출 낭비 금지
+    if (!settings.autoRefine || !isFullyArmed()) return;
     clearTimeout(refineTimer);
     refineTimer = setTimeout(() => { void runRefine(); }, 900);
 }
@@ -585,8 +655,10 @@ function handleIncomingMessage(index) {
         if (meta.manualState && Number(meta.manualState.at ?? 0) < Date.now()) meta.manualState = null;
         saveChatMeta();
     }
-    // 온도 자동 무장/해제 (히스테리시스: 켜짐 5↑, 꺼짐 2↓)
-    if (state?.heat !== null && state?.heat !== undefined && settings.armMode === 'auto') {
+    // 스텔스 모드: 무장 전이면 로컬 감지 시도
+    if (settings.armMode === 'stealth') maybeStealthArm();
+    // 온도 자동 무장/해제 (히스테리시스: 켜짐 5↑, 꺼짐 2↓) — auto·stealth 공통 (해제는 온도 기준)
+    if (state?.heat !== null && state?.heat !== undefined && settings.armMode !== 'manual') {
         if (!meta.autoArmed && state.heat >= AUTO_ARM_ON) {
             meta.autoArmed = true;
             saveChatMeta();
@@ -598,8 +670,12 @@ function handleIncomingMessage(index) {
             }
         } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF) {
             meta.autoArmed = false;
+            if (settings.armMode === 'stealth') {
+                const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+                meta.stealthCooldownFrom = chat.length; // 이후 메시지부터 다시 감지
+            }
             saveChatMeta();
-            toastr.info(`장면 온도 ${state.heat}/10 — 개입을 해제하고 감시로 돌아가요.`, '🔞또또NSFW');
+            toastr.info(`장면 온도 ${state.heat}/10 — 개입을 해제하고 대기로 돌아가요.`, '🔞또또NSFW');
         }
     }
     if (changed) {
@@ -792,6 +868,9 @@ function updateUi() {
         element('tns-max-banned-value').textContent = `${settings.maxBannedActs}개`;
         element('tns-pace-mode').value = String(settings.paceMode);
         element('tns-arm-mode').value = String(settings.armMode);
+        element('tns-stealth-sensitivity').value = String(settings.stealthSensitivity);
+        const keywordsInput = element('tns-stealth-keywords');
+        if (document.activeElement !== keywordsInput) keywordsInput.value = String(settings.stealthKeywords ?? '');
         element('tns-next-hints').checked = Boolean(settings.nextBeatHints);
         element('tns-auto-refine').checked = Boolean(settings.autoRefine);
 
@@ -808,9 +887,11 @@ function updateUi() {
                     ? '이 채팅에서는 쉬는 중'
                     : refineRunning
                         ? '보조 AI 분석 중…'
-                        : settings.armMode === 'auto'
-                            ? (meta?.autoArmed ? `개입 중이에요${heatText}` : `온도를 감시하는 중이에요${heatText}`)
-                            : '장면을 지켜보는 중이에요';
+                        : settings.armMode === 'stealth'
+                            ? (meta?.autoArmed ? `개입 중이에요${heatText}` : '조용히 대기 중이에요 (주입 없음)')
+                            : settings.armMode === 'auto'
+                                ? (meta?.autoArmed ? `개입 중이에요${heatText}` : `온도를 감시하는 중이에요${heatText}`)
+                                : '장면을 지켜보는 중이에요';
 
         element('tns-refine').disabled = refineRunning;
         renderStatePanel();
@@ -847,12 +928,14 @@ function bindUi() {
     bindSetting('tns-enabled', 'enabled', Boolean);
     bindSetting('tns-adult-confirmed', 'adultConfirmed', Boolean);
     bindSetting('tns-arm-mode', 'armMode', String, (settings) => {
-        // 수동으로 전환하면 자동 무장 상태는 리셋
-        if (settings.armMode !== 'auto') {
+        // 수동으로 전환하면 자동 무장 상태는 리셋 (스텔스↔온도 자동 전환은 유지)
+        if (settings.armMode === 'manual') {
             const meta = getChatMeta(false);
             if (meta) { meta.autoArmed = false; saveChatMeta(); }
         }
     });
+    bindSetting('tns-stealth-sensitivity', 'stealthSensitivity', String);
+    bindSetting('tns-stealth-keywords', 'stealthKeywords', String);
     bindSetting('tns-next-hints', 'nextBeatHints', Boolean);
     bindSetting('tns-pace-mode', 'paceMode', String);
     bindSetting('tns-auto-refine', 'autoRefine', Boolean);
