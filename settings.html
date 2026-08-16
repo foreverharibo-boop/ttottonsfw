@@ -48,6 +48,15 @@
           <span>추적된 인물 상태가 아직 없어요. 다음 AI 응답부터 자동으로 채워져요.</span>
         </div>
 
+        <div id="tns-score-box" class="tns-score-box" hidden>
+          <div class="tns-score-head">
+            <strong>스텔스 감지 점수</strong>
+            <span id="tns-score-value" class="tns-count">0 / 기준 6</span>
+          </div>
+          <div id="tns-score-hits" class="tns-acts-list"></div>
+          <small id="tns-score-note">최근 메시지에서 걸린 표현들이에요. 감지가 무디면 민감도를 올리거나 키워드를 추가해보세요.</small>
+        </div>
+
         <div class="tns-section-head tns-acts-head">
           <div>
             <strong>최근 전개 (반복 금지 목록)</strong>
@@ -59,6 +68,12 @@
           <span aria-hidden="true">✨</span>
           <span>기록된 전개가 없어요</span>
         </div>
+
+        <div class="tns-custom-ban-row">
+          <input id="tns-custom-ban-input" type="text" class="text_pole" placeholder="직접 금지할 전개·표현 입력">
+          <button id="tns-custom-ban-add" class="menu_button" type="button">금지 추가</button>
+        </div>
+        <div id="tns-custom-ban-list" class="tns-acts-list"></div>
 
         <div id="tns-next-section">
           <div class="tns-section-head tns-acts-head">

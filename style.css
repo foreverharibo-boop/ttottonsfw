@@ -200,6 +200,48 @@
     border: 1px solid color-mix(in srgb, royalblue 38%, transparent);
 }
 
+.ttotto-nsfw-settings .tns-act-chip.tns-custom-chip {
+    background: transparent;
+    border: 1px dashed color-mix(in srgb, crimson 55%, transparent);
+}
+
+.ttotto-nsfw-settings .tns-act-chip.tns-hit-chip {
+    background: color-mix(in srgb, currentColor 7%, transparent);
+    border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+    font-size: 0.76em;
+}
+
+.ttotto-nsfw-settings .tns-score-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-radius: 8px;
+    background: color-mix(in srgb, currentColor 5%, transparent);
+}
+
+.ttotto-nsfw-settings .tns-score-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.ttotto-nsfw-settings .tns-score-box small {
+    opacity: 0.65;
+    font-size: 0.78em;
+}
+
+.ttotto-nsfw-settings .tns-custom-ban-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.ttotto-nsfw-settings .tns-custom-ban-row input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
 .ttotto-nsfw-settings .tns-empty {
     display: flex;
     align-items: center;

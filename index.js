@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.5.0';
+const EXTENSION_VERSION = '0.6.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -38,15 +38,16 @@ const AUTO_ARM_OFF = 2;
 // 스텔스 모드 로컬 감지: 최근 메시지에서 NSFW 신호를 점수화 (주입·호출 없음)
 const STEALTH_WINDOW = 4; // 최근 몇 개 메시지를 스캔할지
 const STEALTH_THRESHOLDS = Object.freeze({ high: 4, normal: 6, low: 9 });
+const STEALTH_COLD_STREAK = 3; // 이 턴 수 연속 신호 0점이면 온도와 무관하게 개입 해제
 const STEALTH_LEXICON = [
     // 강한 신호 (3점): 명시적 행위·신체
-    { re: /삽입|절정|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|안에\s*들어오|안을\s*채우|몸\s*안에|하나가\s*되|thrust(?:ing|s)?|orgasm|climax|cock|pussy|nipple|entrance|inside\s+her|inside\s+him/gi, w: 3 },
+    { label: '명시적 표현', re: /삽입|절정|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|안에\s*들어오|안을\s*채우|몸\s*안에|하나가\s*되|thrust(?:ing|s)?|orgasm|climax|cock|pussy|nipple|entrance|inside\s+her|inside\s+him/gi, w: 3 },
     // 신음 표기 (3점)
-    { re: /하앙|흐응|아앙|으응|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, w: 3 },
+    { label: '신음 표기', re: /하앙|흐응|아앙|으응|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, w: 3 },
     // 중간 신호 (2점): 탈의·밀착·애무
-    { re: /벗기|벗겨|탈의|알몸|나체|속옷|브래지어|팬티|지퍼를\s*내리|단추를\s*풀|신음|헐떡|핥|빨아|깨물|침대에\s*눕히|다리\s*사이|허벅지\s*안쪽|가슴을\s*움켜|가슴을\s*쓸|몸을\s*겹치|밀어\s*넘어뜨리|undress|strip(?:ped|ping)?|naked|underwear|lick(?:ed|ing|s)?|suck(?:ed|ing|s)?|grind(?:ed|ing|s)?|straddl(?:e|ed|ing)|between\s+(?:her|his)\s+thighs/gi, w: 2 },
+    { label: '탈의·밀착', re: /벗기|벗겨|탈의|알몸|나체|속옷|브래지어|팬티|지퍼를\s*내리|단추를\s*풀|신음|헐떡|핥|빨아|깨물|침대에\s*눕히|다리\s*사이|허벅지\s*안쪽|가슴을\s*움켜|가슴을\s*쓸|몸을\s*겹치|밀어\s*넘어뜨리|undress|strip(?:ped|ping)?|naked|underwear|lick(?:ed|ing|s)?|suck(?:ed|ing|s)?|grind(?:ed|ing|s)?|straddl(?:e|ed|ing)|between\s+(?:her|his)\s+thighs/gi, w: 2 },
     // 약한 신호 (1점): 달아오르는 분위기
-    { re: /키스가\s*깊어|입술을\s*탐|혀가\s*얽|숨이\s*가빠|숨이\s*거칠|달아오|몸이\s*뜨거|열기가\s*번지|목덜미에\s*입|귓불을|허리를\s*끌어당|kiss\s+deepen|breath(?:ing)?\s+(?:hitch|ragged|heavy)|heat\s+pool|shiver(?:ed|ing)?\s+under/gi, w: 1 },
+    { label: '분위기', re: /키스가\s*깊어|입술을\s*탐|혀가\s*얽|숨이\s*가빠|숨이\s*거칠|달아오|몸이\s*뜨거|열기가\s*번지|목덜미에\s*입|귓불을|허리를\s*끌어당|kiss\s+deepen|breath(?:ing)?\s+(?:hitch|ragged|heavy)|heat\s+pool|shiver(?:ed|ing)?\s+under/gi, w: 1 },
 ];
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -111,6 +112,7 @@ function getChatMeta(create = true) {
     }
     const meta = context.chatMetadata[CHAT_STATE_KEY];
     if (!Array.isArray(meta.ignoredActs)) meta.ignoredActs = [];
+    if (!Array.isArray(meta.customBans)) meta.customBans = [];
     return meta;
 }
 
@@ -137,24 +139,36 @@ function isFullyArmed() {
 
 // ───────────────────────── 스텔스 로컬 감지 ─────────────────────────
 
-function nsfwScore(text) {
+function nsfwScoreDetail(text) {
     const source = String(text ?? '');
-    if (!source) return 0;
+    const hits = [];
     let score = 0;
-    for (const { re, w } of STEALTH_LEXICON) {
+    if (!source) return { score, hits };
+    for (const { label, re, w } of STEALTH_LEXICON) {
         re.lastIndex = 0;
+        let match;
         let count = 0;
-        while (count < 3 && re.exec(source) !== null) count++;
+        while (count < 3 && (match = re.exec(source)) !== null) {
+            hits.push({ label, text: match[0], w });
+            count++;
+        }
         score += count * w;
     }
     const custom = String(getSettings().stealthKeywords ?? '').split(',').map((k) => k.trim()).filter(Boolean);
     for (const keyword of custom) {
-        if (source.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) score += 3;
+        if (source.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) {
+            score += 3;
+            hits.push({ label: '커스텀', text: keyword, w: 3 });
+        }
     }
-    return score;
+    return { score, hits };
 }
 
-function stealthWindowScore() {
+function nsfwScore(text) {
+    return nsfwScoreDetail(text).score;
+}
+
+function stealthWindowDetail() {
     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
     // 해제 직후 직전 장면의 잔열로 곧바로 재무장하는 것 방지: 쿨다운 마커 이후 메시지만 스캔
     const from = Number(getChatMeta(false)?.stealthCooldownFrom ?? 0);
@@ -162,7 +176,26 @@ function stealthWindowScore() {
         .map((message, index) => ({ message, index }))
         .filter(({ message, index }) => message && !message.is_system && index >= from)
         .slice(-STEALTH_WINDOW);
-    return recent.reduce((sum, { message }) => sum + nsfwScore(stripStateTag(message.mes)), 0);
+    const hits = [];
+    let score = 0;
+    for (const { message } of recent) {
+        const detail = nsfwScoreDetail(stripStateTag(message.mes));
+        score += detail.score;
+        hits.push(...detail.hits);
+    }
+    return { score, hits };
+}
+
+function stealthWindowScore() {
+    return stealthWindowDetail().score;
+}
+
+// 최근 k개 메시지가 전부 신호 0점인지 (해제 폴백용 — 쿨다운 마커와 무관하게 전체에서 봄)
+function stealthColdStreak(k = STEALTH_COLD_STREAK) {
+    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+    const recent = chat.filter((message) => message && !message.is_system).slice(-k);
+    if (recent.length < k) return false;
+    return recent.every((message) => nsfwScore(stripStateTag(message.mes)) === 0);
 }
 
 // 스텔스 모드에서 NSFW 신호가 기준을 넘으면 무장. 주입도 호출도 없이 로컬 스캔만 사용.
@@ -414,8 +447,10 @@ function nextBeatCandidates() {
             .flatMap((act) => [biText(act, 'en').toLocaleLowerCase(), biText(act, 'ko').toLocaleLowerCase()])
             .filter(Boolean),
     );
+    const customBans = new Set((getChatMeta(false)?.customBans ?? []).map((ban) => String(ban).toLocaleLowerCase()));
     return state.next.filter((beat) => {
         if (isActIgnored(beat, ignored)) return false;
+        if (customBans.has(biText(beat, 'en').toLocaleLowerCase()) || customBans.has(biText(beat, 'ko').toLocaleLowerCase())) return false;
         return !banned.has(biText(beat, 'en').toLocaleLowerCase()) && !banned.has(biText(beat, 'ko').toLocaleLowerCase());
     });
 }
@@ -460,13 +495,19 @@ function buildInjection() {
         sections.push('No scene state has been recorded yet. Establish it in your response and report it in the state block below.');
     }
 
-    if (actRows.length) {
-        sections.push(
-            '',
-            `ALREADY HAPPENED in the last ${actRows.length} response(s) — do NOT repeat these beats, actions, or their near-identical variations:`,
-            ...actRows.map((row) => `- ${row.acts.map((act) => biText(act, 'en')).join(', ')}`),
-            'Repeating a listed beat with different wording still counts as repetition. Bring something new.',
-        );
+    const customBans = (getChatMeta(false)?.customBans ?? []).filter(Boolean);
+    if (actRows.length || customBans.length) {
+        sections.push('');
+        if (actRows.length) {
+            sections.push(
+                `ALREADY HAPPENED in the last ${actRows.length} response(s) — do NOT repeat these beats, actions, or their near-identical variations:`,
+                ...actRows.map((row) => `- ${row.acts.map((act) => biText(act, 'en')).join(', ')}`),
+            );
+        }
+        if (customBans.length) {
+            sections.push(`USER-BANNED (permanent for this chat — never do these): ${customBans.join(', ')}`);
+        }
+        sections.push('Repeating a listed beat with different wording still counts as repetition. Bring something new.');
     }
 
     if (settings.nextBeatHints) {
@@ -678,6 +719,15 @@ function handleIncomingMessage(index) {
             toastr.info(`장면 온도 ${state.heat}/10 — 개입을 해제하고 대기로 돌아가요.`, '🔞또또NSFW');
         }
     }
+    // 해제 폴백: 모델의 온도 보고와 무관하게, 최근 턴들이 연속으로 신호 0점이면 개입 해제
+    // (모델이 온도를 계속 높게 불러서 일상 장면에까지 진행 지시가 들어가는 것 방지)
+    if (settings.armMode !== 'manual' && meta.autoArmed && stealthColdStreak()) {
+        meta.autoArmed = false;
+        const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+        meta.stealthCooldownFrom = chat.length;
+        saveChatMeta();
+        toastr.info(`장면 신호가 ${STEALTH_COLD_STREAK}턴째 없어요 — 개입을 해제해요.`, '🔞또또NSFW');
+    }
     if (changed) {
         rerenderMessage(index, message);
         persistChat();
@@ -851,6 +901,54 @@ function renderStatePanel() {
     const nextSection = element('tns-next-section');
     nextSection.hidden = !settings.nextBeatHints;
     element('tns-next-empty').hidden = !settings.nextBeatHints || beats.length > 0;
+
+    // 수동 금지 목록
+    const customList = element('tns-custom-ban-list');
+    customList.replaceChildren();
+    const meta = getChatMeta(false);
+    for (const ban of meta?.customBans ?? []) {
+        const chip = document.createElement('span');
+        chip.className = 'tns-act-chip tns-custom-chip';
+        const text = document.createElement('span');
+        text.textContent = ban;
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.title = '금지 해제';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => {
+            const chatMeta = getChatMeta();
+            chatMeta.customBans = chatMeta.customBans.filter((item) => item !== ban);
+            saveChatMeta();
+            updateUi();
+        });
+        chip.append(text, remove);
+        customList.append(chip);
+    }
+
+    // 스텔스 감지 점수 뷰어
+    const scoreBox = element('tns-score-box');
+    if (settings.armMode === 'stealth' && isSupervising()) {
+        scoreBox.hidden = false;
+        const { score, hits } = stealthWindowDetail();
+        const threshold = STEALTH_THRESHOLDS[settings.stealthSensitivity] ?? STEALTH_THRESHOLDS.normal;
+        element('tns-score-value').textContent = `${score} / 기준 ${threshold}`;
+        const hitsList = element('tns-score-hits');
+        hitsList.replaceChildren();
+        const seenHits = new Set();
+        for (const hit of hits) {
+            const key = `${hit.label}:${hit.text.toLocaleLowerCase()}`;
+            if (seenHits.has(key)) continue;
+            seenHits.add(key);
+            if (seenHits.size > 12) break;
+            const chip = document.createElement('span');
+            chip.className = 'tns-act-chip tns-hit-chip';
+            chip.textContent = `${hit.text} (${hit.label} +${hit.w})`;
+            hitsList.append(chip);
+        }
+        element('tns-score-note').hidden = hits.length > 0;
+    } else {
+        scoreBox.hidden = true;
+    }
 }
 
 function updateUi() {
@@ -976,6 +1074,21 @@ function bindUi() {
     });
 
     element('tns-refine').addEventListener('click', () => { void runRefine({ manual: true }); });
+
+    const addCustomBan = () => {
+        const input = element('tns-custom-ban-input');
+        const value = input.value.trim();
+        if (!value) return;
+        const meta = getChatMeta();
+        if (!meta.customBans.includes(value)) meta.customBans.push(value);
+        input.value = '';
+        saveChatMeta();
+        updateUi();
+    };
+    element('tns-custom-ban-add').addEventListener('click', addCustomBan);
+    element('tns-custom-ban-input').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); addCustomBan(); }
+    });
 
     element('tns-clear-state').addEventListener('click', () => {
         const meta = getChatMeta();
