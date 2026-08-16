@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.1.3';
+const EXTENSION_VERSION = '0.2.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -31,9 +31,15 @@ const PACE_INSTRUCTIONS = Object.freeze({
 // 실질적 무제한 — 잘림 방지용 안전 상한만 백만으로 걸어둔다
 const SAFETY_LIMIT = 1000000;
 
+// 온도 자동 무장 히스테리시스: 이 온도 이상이면 개입 시작, 이 온도 이하면 해제
+const AUTO_ARM_ON = 5;
+const AUTO_ARM_OFF = 2;
+
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     adultConfirmed: false,
+    armMode: 'manual', // 'manual' = 채팅 토글로 직접, 'auto' = 장면 온도 감지로 자동
+    nextBeatHints: true,
     repeatWindow: 3,
     paceMode: 'slow',
     autoRefine: true,
@@ -83,7 +89,7 @@ function getChatMeta(create = true) {
     if (!context.chatMetadata || typeof context.chatMetadata !== 'object') return null;
     if (!context.chatMetadata[CHAT_STATE_KEY]) {
         if (!create) return null;
-        context.chatMetadata[CHAT_STATE_KEY] = { enabled: false, manualState: null, ignoredActs: [] };
+        context.chatMetadata[CHAT_STATE_KEY] = { enabled: false, manualState: null, ignoredActs: [], autoArmed: false };
     }
     const meta = context.chatMetadata[CHAT_STATE_KEY];
     if (!Array.isArray(meta.ignoredActs)) meta.ignoredActs = [];
@@ -96,10 +102,19 @@ function saveChatMeta() {
     else if (typeof context.saveMetadata === 'function') void context.saveMetadata();
 }
 
-function isArmed() {
+// 감시 중: 이 채팅에서 확장이 동작할 조건이 다 켜져 있는 상태 (최소한 상태 태그는 수집)
+function isSupervising() {
     const settings = getSettings();
     const meta = getChatMeta(false);
     return Boolean(runtimeActive && settings.enabled && settings.adultConfirmed && meta?.enabled);
+}
+
+// 완전 무장: 연속성·반복금지·진행 지시까지 전부 주입하는 상태
+function isFullyArmed() {
+    if (!isSupervising()) return false;
+    const settings = getSettings();
+    if (settings.armMode !== 'auto') return true;
+    return Boolean(getChatMeta(false)?.autoArmed);
 }
 
 // ───────────────────────── 상태 스냅샷 ─────────────────────────
@@ -119,7 +134,11 @@ function sanitizeState(raw) {
     }
     const acts = Array.isArray(raw.acts) ? raw.acts : [];
     clean.acts = acts.map((act) => String(act ?? '').trim().slice(0, SAFETY_LIMIT)).filter(Boolean).slice(0, 64);
-    if (!clean.location && !Object.keys(clean.characters).length && !clean.acts.length) return null;
+    const heat = Number(raw.heat);
+    clean.heat = Number.isFinite(heat) ? Math.max(0, Math.min(10, Math.round(heat))) : null;
+    const next = Array.isArray(raw.next) ? raw.next : [];
+    clean.next = next.map((beat) => String(beat ?? '').trim().slice(0, SAFETY_LIMIT)).filter(Boolean).slice(0, 8);
+    if (!clean.location && !Object.keys(clean.characters).length && !clean.acts.length && clean.heat === null && !clean.next.length) return null;
     return clean;
 }
 
@@ -176,7 +195,7 @@ function snapshotForMessage(message) {
 
 // AI 메시지에서 상태 태그를 추출·저장하고 본문에서 제거. 변경 여부를 반환.
 function harvestMessage(message) {
-    if (!message || message.is_user || message.is_system) return { changed: false, found: false };
+    if (!message || message.is_user || message.is_system) return { changed: false, found: false, state: null };
     const swipeIndex = currentSwipeIndex(message);
     let changed = false;
     let found = false;
@@ -202,7 +221,7 @@ function harvestMessage(message) {
     if (!found) {
         found = Boolean(snapshotForMessage(message));
     }
-    return { changed, found };
+    return { changed, found, state };
 }
 
 function assistantMessages() {
@@ -260,9 +279,39 @@ function buildStateLines(state) {
     return lines;
 }
 
+// 최신 스냅샷의 다음 전개 후보 (반복 금지 목록·무시 목록과 겹치는 건 제외)
+function nextBeatCandidates() {
+    const meta = getChatMeta(false);
+    const ignored = new Set((meta?.ignoredActs ?? []).map((act) => act.toLocaleLowerCase()));
+    const { state } = effectiveState();
+    if (!state?.next?.length) return [];
+    const settings = getSettings();
+    const banned = new Set(
+        recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow)
+            .flatMap((row) => row.acts)
+            .map((act) => act.toLocaleLowerCase()),
+    );
+    return state.next.filter((beat) => {
+        const key = beat.toLocaleLowerCase();
+        return !ignored.has(key) && !banned.has(key);
+    });
+}
+
+const STATE_REPORT_LINES = [
+    'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON, Korean values). It is machine-read and hidden from the reader — include it every time:',
+    '<scene_state>{"location":"현재 장소","characters":{"이름":{"clothing":"현재 복장 상태","position":"현재 자세·위치","contact":"현재 신체 접촉"}},"acts":["이번 응답에서 새로 일어난 전개·행위 2~5개, 짧은 한국어 구"],"heat":0,"next":["다음에 이어질 만한 새로운 전개 후보 2~3개, 짧은 한국어 구"]}</scene_state>',
+    '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). Update every field to reflect the situation at the END of your response. List only beats that are new in this response under "acts". "next" must not repeat anything from "acts".',
+];
+
 function buildInjection() {
     const settings = getSettings();
     const { state } = effectiveState();
+
+    // 온도 자동 모드에서 아직 무장 전: 상태 태그만 조용히 수집 (감시 주입)
+    if (!isFullyArmed()) {
+        return ['[Scene Monitor]', ...STATE_REPORT_LINES].join('\n');
+    }
+
     const actRows = recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow);
     const pace = PACE_INSTRUCTIONS[settings.paceMode] ?? PACE_INSTRUCTIONS.slow;
 
@@ -287,14 +336,18 @@ function buildInjection() {
         );
     }
 
-    sections.push('', `PACING: ${pace}`);
+    if (settings.nextBeatHints) {
+        const beats = nextBeatCandidates();
+        if (beats.length) {
+            sections.push(
+                '',
+                `SUGGESTED NEXT BEATS (pick one, or do something even better — never fall back to a banned beat): ${beats.join(' / ')}`,
+            );
+        }
+    }
 
-    sections.push(
-        '',
-        'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON, Korean values). It is machine-read and hidden from the reader — include it every time:',
-        '<scene_state>{"location":"현재 장소","characters":{"이름":{"clothing":"현재 복장 상태","position":"현재 자세·위치","contact":"현재 신체 접촉"}},"acts":["이번 응답에서 새로 일어난 전개·행위 2~5개, 짧은 한국어 구"]}</scene_state>',
-        'Update every field to reflect the situation at the END of your response. List only beats that are new in this response under "acts".',
-    );
+    sections.push('', `PACING: ${pace}`);
+    sections.push('', ...STATE_REPORT_LINES);
 
     return sections.join('\n');
 }
@@ -310,7 +363,7 @@ function clearInjectedPrompt() {
 globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGenerationInterceptor(_chat, _contextSize, _abort, type) {
     clearInjectedPrompt();
     try {
-        if (!isArmed()) return;
+        if (!isSupervising()) return;
         if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) return;
         const prompt = buildInjection();
         if (!prompt) return;
@@ -339,7 +392,7 @@ function buildRefineInput() {
 }
 
 function refinePromptMessages() {
-    const system = 'You are a scene-state tracker for an adult fiction roleplay log. All characters are adults. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.\n\nSchema:\n{"location":"current location, short Korean phrase","characters":{"name":{"clothing":"current clothing state, Korean","position":"current posture/position, Korean","contact":"current physical contact, Korean"}},"acts":["2-5 short Korean phrases naming the beats/actions that occurred in the most recent CHARACTER message only"]}\n\nRules:\n- Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.\n- "acts" must cover only the final CHARACTER message, not the whole log.\n- Include every present character. Use the exact names from the log.\n- If something is unknown, use an empty string. Return the JSON object only.';
+    const system = 'You are a scene-state tracker for an adult fiction roleplay log. All characters are adults. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.\n\nSchema:\n{"location":"current location, short Korean phrase","characters":{"name":{"clothing":"current clothing state, Korean","position":"current posture/position, Korean","contact":"current physical contact, Korean"}},"acts":["2-5 short Korean phrases naming the beats/actions that occurred in the most recent CHARACTER message only"],"heat":0,"next":["2-3 short Korean phrases suggesting fresh beats the scene could move to next"]}\n\nRules:\n- Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.\n- "acts" must cover only the final CHARACTER message, not the whole log.\n- "heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday) to 10 (peak).\n- "next" must not repeat anything already listed in "acts".\n- Include every present character. Use the exact names from the log.\n- If something is unknown, use an empty string. Return the JSON object only.';
     const user = `Log excerpt (oldest first):\n\n${buildRefineInput()}`;
     return [
         { role: 'system', content: system },
@@ -419,7 +472,7 @@ async function runRefine({ manual = false } = {}) {
 
 function scheduleAutoRefine() {
     const settings = getSettings();
-    if (!settings.autoRefine || !isArmed()) return;
+    if (!settings.autoRefine || !isSupervising()) return;
     clearTimeout(refineTimer);
     refineTimer = setTimeout(() => { void runRefine(); }, 900);
 }
@@ -461,11 +514,23 @@ function handleIncomingMessage(index) {
     const message = messageByIndex(index);
     if (!message || message.is_user || message.is_system) return;
 
-    const { changed, found } = harvestMessage(message);
+    const { changed, found, state } = harvestMessage(message);
     if (found) {
         // 새 스냅샷이 수동 보정보다 최신이므로 수동 보정은 자연히 밀려남
         if (meta.manualState && Number(meta.manualState.at ?? 0) < Date.now()) meta.manualState = null;
         saveChatMeta();
+    }
+    // 온도 자동 무장/해제 (히스테리시스: 켜짐 5↑, 꺼짐 2↓)
+    if (state?.heat !== null && state?.heat !== undefined && settings.armMode === 'auto') {
+        if (!meta.autoArmed && state.heat >= AUTO_ARM_ON) {
+            meta.autoArmed = true;
+            saveChatMeta();
+            toastr.info(`장면 온도 ${state.heat}/10 — 연속성 개입을 시작해요.`, '🔞또또NSFW');
+        } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF) {
+            meta.autoArmed = false;
+            saveChatMeta();
+            toastr.info(`장면 온도 ${state.heat}/10 — 개입을 해제하고 감시로 돌아가요.`, '🔞또또NSFW');
+        }
     }
     if (changed) {
         rerenderMessage(index, message);
@@ -542,6 +607,15 @@ function renderStatePanel() {
     const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
     element('tns-state-source').textContent = refineRunning ? '보조 AI 분석 중…' : sourceLabel;
 
+    const heatBadge = element('tns-heat');
+    if (state?.heat !== null && state?.heat !== undefined) {
+        heatBadge.hidden = false;
+        heatBadge.textContent = `🌡️ ${state.heat}/10`;
+        heatBadge.classList.toggle('is-hot', state.heat >= AUTO_ARM_ON);
+    } else {
+        heatBadge.hidden = true;
+    }
+
     const locationInput = element('tns-state-location');
     if (document.activeElement !== locationInput) locationInput.value = state?.location ?? '';
 
@@ -601,6 +675,32 @@ function renderStatePanel() {
     }
     element('tns-acts-empty').hidden = rows.length > 0;
     element('tns-acts-summary').textContent = `최근 ${settings.repeatWindow}턴 기준`;
+
+    // 다음 전개 후보
+    const nextList = element('tns-next-list');
+    nextList.replaceChildren();
+    const beats = settings.nextBeatHints ? nextBeatCandidates() : [];
+    for (const beat of beats) {
+        const chip = document.createElement('span');
+        chip.className = 'tns-act-chip tns-next-chip';
+        const text = document.createElement('span');
+        text.textContent = beat;
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.title = '이 후보는 제안에서 제외';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => {
+            const meta = getChatMeta();
+            if (!meta.ignoredActs.includes(beat)) meta.ignoredActs.push(beat);
+            saveChatMeta();
+            updateUi();
+        });
+        chip.append(text, remove);
+        nextList.append(chip);
+    }
+    const nextSection = element('tns-next-section');
+    nextSection.hidden = !settings.nextBeatHints;
+    element('tns-next-empty').hidden = !settings.nextBeatHints || beats.length > 0;
 }
 
 function updateUi() {
@@ -615,11 +715,15 @@ function updateUi() {
         element('tns-repeat-window').value = String(settings.repeatWindow);
         element('tns-repeat-window-value').textContent = `${settings.repeatWindow}턴`;
         element('tns-pace-mode').value = String(settings.paceMode);
+        element('tns-arm-mode').value = String(settings.armMode);
+        element('tns-next-hints').checked = Boolean(settings.nextBeatHints);
         element('tns-auto-refine').checked = Boolean(settings.autoRefine);
 
         element('tns-adult-warning').hidden = Boolean(settings.adultConfirmed);
 
-        const armed = isArmed();
+        const armed = isSupervising();
+        const heat = effectiveState().state?.heat;
+        const heatText = heat !== null && heat !== undefined ? ` (온도 ${heat}/10)` : '';
         element('tns-header-status').textContent = !settings.enabled
             ? '꺼져 있어요'
             : !settings.adultConfirmed
@@ -628,7 +732,9 @@ function updateUi() {
                     ? '이 채팅에서는 쉬는 중'
                     : refineRunning
                         ? '보조 AI 분석 중…'
-                        : '장면을 지켜보는 중이에요';
+                        : settings.armMode === 'auto'
+                            ? (meta?.autoArmed ? `개입 중이에요${heatText}` : `온도를 감시하는 중이에요${heatText}`)
+                            : '장면을 지켜보는 중이에요';
 
         element('tns-refine').disabled = refineRunning;
         renderStatePanel();
@@ -664,6 +770,14 @@ function bindUi() {
 
     bindSetting('tns-enabled', 'enabled', Boolean);
     bindSetting('tns-adult-confirmed', 'adultConfirmed', Boolean);
+    bindSetting('tns-arm-mode', 'armMode', String, (settings) => {
+        // 수동으로 전환하면 자동 무장 상태는 리셋
+        if (settings.armMode !== 'auto') {
+            const meta = getChatMeta(false);
+            if (meta) { meta.autoArmed = false; saveChatMeta(); }
+        }
+    });
+    bindSetting('tns-next-hints', 'nextBeatHints', Boolean);
     bindSetting('tns-pace-mode', 'paceMode', String);
     bindSetting('tns-auto-refine', 'autoRefine', Boolean);
     bindSetting('tns-refine-profile', 'refineProfileId', String);
@@ -751,7 +865,9 @@ function registerEvents() {
     };
 
     listen('MESSAGE_RECEIVED', (index) => handleIncomingMessage(index));
-    listen('MESSAGE_SWIPED', () => updateUi());
+    // 스와이프 보험: ST 버전에 따라 스와이프 생성 후 MESSAGE_RECEIVED가 안 오는 경우를 이중으로 잡는다
+    listen('GENERATION_ENDED', () => handleIncomingMessage());
+    listen('MESSAGE_SWIPED', (index) => handleIncomingMessage(index));
     listen('MESSAGE_EDITED', () => updateUi());
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {

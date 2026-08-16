@@ -154,6 +154,21 @@
     gap: 6px;
 }
 
+.ttotto-nsfw-settings .tns-heat {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 0.78em;
+    font-weight: 400;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.ttotto-nsfw-settings .tns-heat.is-hot {
+    background: color-mix(in srgb, crimson 22%, transparent);
+    border: 1px solid color-mix(in srgb, crimson 45%, transparent);
+}
+
 .ttotto-nsfw-settings .tns-act-chip {
     display: inline-flex;
     align-items: center;
@@ -178,6 +193,11 @@
 
 .ttotto-nsfw-settings .tns-act-chip button:hover {
     opacity: 1;
+}
+
+.ttotto-nsfw-settings .tns-act-chip.tns-next-chip {
+    background: color-mix(in srgb, royalblue 16%, transparent);
+    border: 1px solid color-mix(in srgb, royalblue 38%, transparent);
 }
 
 .ttotto-nsfw-settings .tns-empty {

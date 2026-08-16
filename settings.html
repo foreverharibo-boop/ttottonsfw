@@ -31,7 +31,7 @@
       <section id="tns-panel-state" class="tns-panel" role="tabpanel" aria-labelledby="tns-tab-state">
         <div class="tns-section-head">
           <div>
-            <strong>현재 장면 상태</strong>
+            <strong>현재 장면 상태 <span id="tns-heat" class="tns-heat" hidden></span></strong>
             <small id="tns-state-source">아직 기록 없음</small>
           </div>
           <button id="tns-toggle-preview" class="menu_button" type="button">주입문 보기</button>
@@ -58,6 +58,20 @@
         <div id="tns-acts-empty" class="tns-empty" hidden>
           <span aria-hidden="true">✨</span>
           <span>기록된 전개가 없어요</span>
+        </div>
+
+        <div id="tns-next-section">
+          <div class="tns-section-head tns-acts-head">
+            <div>
+              <strong>다음 전개 후보</strong>
+              <small>AI가 제안한 새 전개예요. 다음 생성에 힌트로 주입돼요.</small>
+            </div>
+          </div>
+          <div id="tns-next-list" class="tns-acts-list"></div>
+          <div id="tns-next-empty" class="tns-empty" hidden>
+            <span aria-hidden="true">💡</span>
+            <span>제안된 후보가 아직 없어요</span>
+          </div>
         </div>
 
         <div id="tns-prompt-preview" class="tns-prompt-preview" hidden>
@@ -93,6 +107,23 @@
             <small>채팅마다 따로 켜고 끌 수 있어요. NSFW 장면이 시작될 때 켜주세요.</small>
           </span>
           <input id="tns-chat-enabled" type="checkbox">
+        </label>
+
+        <label class="tns-field" for="tns-arm-mode">
+          <span>개입 방식</span>
+          <select id="tns-arm-mode" class="text_pole">
+            <option value="manual">수동 — 위 채팅 토글을 켜면 바로 개입</option>
+            <option value="auto">온도 자동 — 장면이 달아오르면(5↑) 개입, 식으면(2↓) 해제</option>
+          </select>
+          <small>자동 모드에서는 평소엔 장면 온도만 조용히 지켜봐요. 채팅 토글은 켜져 있어야 해요.</small>
+        </label>
+
+        <label class="tns-setting-row" for="tns-next-hints">
+          <span>
+            <strong>다음 전개 힌트</strong>
+            <small>AI가 제안한 새 전개 후보를 다음 생성에 힌트로 같이 주입해요</small>
+          </span>
+          <input id="tns-next-hints" type="checkbox">
         </label>
 
         <div class="tns-field">
