@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.9.1';
+const EXTENSION_VERSION = '0.9.2';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -868,8 +868,15 @@ function setTab(tab) {
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-selected', String(active));
     });
-    element('tns-panel-state').hidden = tab !== 'state';
-    element('tns-panel-settings').hidden = tab !== 'settings';
+    // hidden 속성만으로는 팝업/테마 CSS와 충돌할 수 있어 인라인 스타일로도 강제한다
+    const panels = { state: element('tns-panel-state'), settings: element('tns-panel-settings') };
+    for (const [name, panel] of Object.entries(panels)) {
+        if (!panel) continue;
+        const active = name === tab;
+        panel.hidden = !active;
+        if (active) panel.style.removeProperty('display');
+        else panel.style.setProperty('display', 'none', 'important');
+    }
 }
 
 function populateProfiles() {
@@ -1162,8 +1169,15 @@ function bindSetting(id, key, parser = (value) => value, after = null) {
 }
 
 function bindUi() {
-    document.querySelectorAll('#ttotto-nsfw-settings [data-tns-tab]').forEach((button) => {
-        button.addEventListener('click', () => setTab(button.dataset.tnsTab));
+    // 탭 클릭은 루트 위임으로 — 패널이 팝업으로 이동해도, 어떤 환경에서도 확실히 잡힌다
+    const root = document.getElementById('ttotto-nsfw-settings');
+    root.addEventListener('click', (event) => {
+        const button = event.target?.closest?.('[data-tns-tab]');
+        if (button && root.contains(button)) {
+            event.preventDefault();
+            event.stopPropagation();
+            setTab(button.dataset.tnsTab);
+        }
     });
 
     bindSetting('tns-enabled', 'enabled', Boolean);
@@ -1315,6 +1329,9 @@ function openPopup() {
     if (!settingsHomeParent) settingsHomeParent = panel.parentElement;
     document.getElementById('tns-popup-body').append(panel);
     panel.classList.add('tns-in-popup');
+    // 드로어가 접혀 있었어도 팝업에서는 무조건 펼침 (인라인 강제)
+    const drawerContent = panel.querySelector('.inline-drawer-content');
+    if (drawerContent) drawerContent.style.setProperty('display', 'block', 'important');
     overlay.classList.add('open');
     popupOpen = true;
     updateUi();
@@ -1326,6 +1343,8 @@ function closePopup() {
     overlay?.classList.remove('open');
     if (panel && settingsHomeParent) {
         panel.classList.remove('tns-in-popup');
+        const drawerContent = panel.querySelector('.inline-drawer-content');
+        if (drawerContent) drawerContent.style.removeProperty('display');
         settingsHomeParent.append(panel);
     }
     popupOpen = false;
