@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.6.0';
+const EXTENSION_VERSION = '0.7.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -27,6 +27,25 @@ const PACE_INSTRUCTIONS = Object.freeze({
     slow: 'Move the scene forward to its next natural beat. Advance gradually — one meaningful step per response.',
     push: 'Actively escalate. Each response must clearly progress the scene beyond where the previous one ended.',
 });
+
+// 장면 스타일 다이얼 — 무장 중에만 적용
+const STYLE_LENGTH_INSTRUCTIONS = Object.freeze({
+    tight: 'Length: keep the response tight — 2-3 short paragraphs. Every sentence must carry sensation, action, or reaction; cut filler narration. Leave room for the user to act.',
+    normal: '',
+    long: 'Length: write a full, unhurried response — take space to build each moment. Do not rush through beats; linger where it matters.',
+});
+const STYLE_BALANCE_INSTRUCTIONS = Object.freeze({
+    dialogue: 'Balance: dialogue-forward. The character keeps talking through the scene — teasing, reacting, murmuring, demanding. Physical description supports the dialogue, not the other way around.',
+    balanced: '',
+    sensory: 'Balance: sensory-forward. Prioritize concrete physical sensation — touch, heat, breath, weight, sound. Keep dialogue sparse and purposeful.',
+    internal: 'Balance: interiority-forward. Keep the character\'s inner voice present — thoughts, restraint, want, conflict — woven through the physical action.',
+});
+
+// 해제 브릿지 — 개입 해제 직후 딱 한 번, 장면을 자연스럽게 마무리시키는 지시
+const BRIDGE_LINES = [
+    '[Scene Wind-Down] The intimate scene has just concluded. This response is the wind-down: settle the afterglow naturally — calming breath, small gestures, quiet words, gentle humor if it fits the characters.',
+    'Reflect what just happened in the characters\' mood and closeness. Do not restart or escalate the scene, and do not jump abruptly to unrelated everyday narration.',
+];
 
 // 실질적 무제한 — 잘림 방지용 안전 상한만 백만으로 걸어둔다
 const SAFETY_LIMIT = 1000000;
@@ -61,6 +80,9 @@ const DEFAULT_SETTINGS = Object.freeze({
     repeatWindow: 3,
     maxBannedActs: 15, // 반복 금지 목록 총량 상한 — 넘치면 오래된 것부터 제외
     paceMode: 'slow',
+    styleLength: 'normal', // 'tight' | 'normal' | 'long' — 무장 중 응답 길이
+    styleBalance: 'balanced', // 'dialogue' | 'balanced' | 'sensory' | 'internal' — 무장 중 묘사 밸런스
+    exitBridge: true, // 해제 직후 한 번, 장면 마무리 지시 주입
     autoRefine: true,
     refineProfileId: '',
     refineMaxTokens: SAFETY_LIMIT,
@@ -474,10 +496,13 @@ function buildInjection() {
     const settings = getSettings();
     const { state } = effectiveState();
 
-    // 무장 전: 스텔스 모드는 아예 아무것도 주입하지 않고, 온도 감시 모드는 온도 한 줄만 요청
+    // 무장 전: 해제 브릿지가 걸려 있으면 마무리 지시를 한 번 주입.
+    // 그 외엔 스텔스 모드는 아무것도 주입하지 않고, 온도 감시 모드는 온도 한 줄만 요청
     if (!isFullyArmed()) {
-        if (settings.armMode === 'stealth') return '';
-        return MONITOR_REPORT_LINES.join('\n');
+        const parts = [];
+        if (settings.exitBridge && getChatMeta(false)?.bridgePending) parts.push(...BRIDGE_LINES);
+        if (settings.armMode !== 'stealth') parts.push(...MONITOR_REPORT_LINES);
+        return parts.join('\n');
     }
 
     const actRows = recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow);
@@ -521,6 +546,13 @@ function buildInjection() {
     }
 
     sections.push('', `PACING: ${pace}`);
+
+    const styleParts = [
+        STYLE_LENGTH_INSTRUCTIONS[settings.styleLength] ?? '',
+        STYLE_BALANCE_INSTRUCTIONS[settings.styleBalance] ?? '',
+    ].filter(Boolean);
+    if (styleParts.length) sections.push('', ...styleParts);
+
     sections.push('', ...STATE_REPORT_LINES);
 
     return sections.join('\n');
@@ -543,6 +575,12 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
         const prompt = buildInjection();
         if (!prompt) return;
         getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
+        // 해제 브릿지는 딱 한 번만: 이번 생성에 실렸으면 플래그를 끈다 (미리보기는 소모하지 않음)
+        const meta = getChatMeta(false);
+        if (meta?.bridgePending && !isFullyArmed()) {
+            meta.bridgePending = false;
+            saveChatMeta();
+        }
         console.debug(`${LOG_PREFIX} 장면 연속성 지침 주입 (${prompt.length}자)`);
     } catch (error) {
         clearInjectedPrompt();
@@ -711,6 +749,7 @@ function handleIncomingMessage(index) {
             }
         } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF) {
             meta.autoArmed = false;
+            meta.bridgePending = true; // 다음 생성 한 번은 장면 마무리 지시
             if (settings.armMode === 'stealth') {
                 const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
                 meta.stealthCooldownFrom = chat.length; // 이후 메시지부터 다시 감지
@@ -723,6 +762,7 @@ function handleIncomingMessage(index) {
     // (모델이 온도를 계속 높게 불러서 일상 장면에까지 진행 지시가 들어가는 것 방지)
     if (settings.armMode !== 'manual' && meta.autoArmed && stealthColdStreak()) {
         meta.autoArmed = false;
+        meta.bridgePending = true;
         const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
         meta.stealthCooldownFrom = chat.length;
         saveChatMeta();
@@ -965,6 +1005,9 @@ function updateUi() {
         element('tns-max-banned').value = String(settings.maxBannedActs);
         element('tns-max-banned-value').textContent = `${settings.maxBannedActs}개`;
         element('tns-pace-mode').value = String(settings.paceMode);
+        element('tns-style-length').value = String(settings.styleLength);
+        element('tns-style-balance').value = String(settings.styleBalance);
+        element('tns-exit-bridge').checked = Boolean(settings.exitBridge);
         element('tns-arm-mode').value = String(settings.armMode);
         element('tns-stealth-sensitivity').value = String(settings.stealthSensitivity);
         const keywordsInput = element('tns-stealth-keywords');
@@ -1036,6 +1079,9 @@ function bindUi() {
     bindSetting('tns-stealth-keywords', 'stealthKeywords', String);
     bindSetting('tns-next-hints', 'nextBeatHints', Boolean);
     bindSetting('tns-pace-mode', 'paceMode', String);
+    bindSetting('tns-style-length', 'styleLength', String);
+    bindSetting('tns-style-balance', 'styleBalance', String);
+    bindSetting('tns-exit-bridge', 'exitBridge', Boolean);
     bindSetting('tns-auto-refine', 'autoRefine', Boolean);
     bindSetting('tns-refine-profile', 'refineProfileId', String);
 

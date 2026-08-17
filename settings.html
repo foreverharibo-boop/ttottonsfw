@@ -178,6 +178,33 @@
           </select>
         </label>
 
+        <label class="tns-field" for="tns-style-length">
+          <span>장면 응답 길이 (무장 중에만 적용)</span>
+          <select id="tns-style-length" class="text_pole">
+            <option value="tight">짧고 밀도 있게 — 2~3문단, 끼어들 틈 남기기</option>
+            <option value="normal">모델에게 맡기기 (기본)</option>
+            <option value="long">길고 자세하게 — 서두르지 않고 풀어쓰기</option>
+          </select>
+        </label>
+
+        <label class="tns-field" for="tns-style-balance">
+          <span>장면 묘사 밸런스 (무장 중에만 적용)</span>
+          <select id="tns-style-balance" class="text_pole">
+            <option value="dialogue">대사 위주 — 캐릭터가 계속 말을 걸게</option>
+            <option value="balanced">모델에게 맡기기 (기본)</option>
+            <option value="sensory">감각 묘사 위주 — 대사는 아껴서</option>
+            <option value="internal">심리 위주 — 속마음이 계속 보이게</option>
+          </select>
+        </label>
+
+        <label class="tns-setting-row" for="tns-exit-bridge">
+          <span>
+            <strong>해제 브릿지</strong>
+            <small>장면이 끝나 개입이 해제되면, 다음 생성 한 번에만 "여운 있게 마무리" 지시를 넣어요</small>
+          </span>
+          <input id="tns-exit-bridge" type="checkbox">
+        </label>
+
         <label class="tns-setting-row" for="tns-auto-refine">
           <span>
             <strong>태그 누락 시 자동 보정</strong>
