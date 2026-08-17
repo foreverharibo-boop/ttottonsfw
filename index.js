@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.7.0';
+const EXTENSION_VERSION = '0.8.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -95,6 +95,8 @@ let eventsRegistered = false;
 let refineRunning = false;
 let refineAbortController = null;
 let refineTimer = null;
+let popupOpen = false;
+let settingsHomeParent = null;
 const registeredEventHandlers = [];
 
 // ───────────────────────── 컨텍스트/설정 ─────────────────────────
@@ -1158,6 +1160,85 @@ function bindUi() {
     });
 }
 
+// ───────────────────────── 팝업 (완드 메뉴 빠른 접근) ─────────────────────────
+// 설정 패널 DOM을 통째로 팝업으로 옮겼다가 닫을 때 되돌린다 — 모든 기능·바인딩이 그대로 동작.
+
+function buildPopupShell() {
+    if (document.getElementById('tns-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'tns-overlay';
+    overlay.className = 'tns-overlay';
+    overlay.innerHTML = [
+        '<div class="tns-popup">',
+        '  <div class="tns-popup-header">',
+        '    <strong>🔞 또또NSFW</strong>',
+        '    <button id="tns-popup-close" class="menu_button" type="button" title="닫기">✕</button>',
+        '  </div>',
+        '  <div id="tns-popup-body" class="tns-popup-body"></div>',
+        '</div>',
+    ].join('\n');
+    // MovingUI가 body에 transform을 걸어 fixed가 깨지는 문제: 오버레이 자체에 transform 리셋으로 대응 (킨크 추출기와 동일)
+    document.body.append(overlay);
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) closePopup();
+    });
+    overlay.querySelector('#tns-popup-close').addEventListener('click', closePopup);
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && popupOpen) closePopup();
+    });
+}
+
+function openPopup() {
+    if (!uiReady) {
+        toastr.warning('설정 패널이 아직 준비되지 않았어요. 잠시 후 다시 열어주세요.', '🔞또또NSFW');
+        return;
+    }
+    buildPopupShell();
+    const panel = document.getElementById('ttotto-nsfw-settings');
+    const overlay = document.getElementById('tns-overlay');
+    if (!panel || !overlay) return;
+    if (!settingsHomeParent) settingsHomeParent = panel.parentElement;
+    document.getElementById('tns-popup-body').append(panel);
+    panel.classList.add('tns-in-popup');
+    overlay.classList.add('open');
+    popupOpen = true;
+    updateUi();
+}
+
+function closePopup() {
+    const overlay = document.getElementById('tns-overlay');
+    const panel = document.getElementById('ttotto-nsfw-settings');
+    overlay?.classList.remove('open');
+    if (panel && settingsHomeParent) {
+        panel.classList.remove('tns-in-popup');
+        settingsHomeParent.append(panel);
+    }
+    popupOpen = false;
+}
+
+function addWandButton() {
+    if (document.getElementById('tns-wand-button')) return;
+    const menu = document.getElementById('extensionsMenu');
+    if (!menu) {
+        console.warn(`${LOG_PREFIX} #extensionsMenu를 찾지 못했습니다 — ST 버전에 따라 셀렉터 조정이 필요할 수 있어요.`);
+        return;
+    }
+    const item = document.createElement('div');
+    item.id = 'tns-wand-button';
+    item.className = 'list-group-item flex-container flexGap5 interactable';
+    item.tabIndex = 0;
+    item.innerHTML = '<span class="extensionsMenuExtensionButton" aria-hidden="true">🔞</span><span>또또NSFW</span>';
+    item.addEventListener('click', () => {
+        menu.style.display = 'none';
+        openPopup();
+    });
+    menu.append(item);
+}
+
+function removeWandButton() {
+    document.getElementById('tns-wand-button')?.remove();
+}
+
 async function loadSettingsHtml() {
     const response = await fetch(new URL('settings.html', EXTENSION_BASE_URL));
     if (!response.ok) throw new Error(`settings.html 로드 실패 (HTTP ${response.status})`);
@@ -1177,6 +1258,7 @@ async function initializeUi() {
     bindUi();
     populateProfiles();
     setTab('state');
+    addWandButton();
     updateUi();
 }
 
@@ -1232,6 +1314,7 @@ async function initialize() {
 export function onEnable() {
     runtimeActive = true;
     registerEvents();
+    if (uiReady) addWandButton();
     updateUi();
 }
 
@@ -1239,11 +1322,16 @@ export function onDisable() {
     runtimeActive = false;
     clearTimeout(refineTimer);
     refineAbortController?.abort();
+    closePopup();
+    removeWandButton();
     unregisterEvents();
     clearInjectedPrompt();
 }
 
 export function onClean() {
+    closePopup();
+    removeWandButton();
+    document.getElementById('tns-overlay')?.remove();
     const context = getContext();
     delete context.extensionSettings[MODULE_NAME];
     if (context.chatMetadata && typeof context.chatMetadata === 'object') {
