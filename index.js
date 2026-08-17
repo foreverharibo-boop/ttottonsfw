@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.9.0';
+const EXTENSION_VERSION = '0.9.1';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -86,7 +86,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     exitBridge: true, // 해제 직후 한 번, 장면 마무리 지시 주입
     autoRefine: true,
     refineProfileId: '',
-    refineMaxTokens: SAFETY_LIMIT,
+    refineMaxTokens: 20000, // 상한일 뿐 실제 소모와 무관 — 백만은 일부 백엔드(Gemini 등)가 거부하므로 2만으로
     refineContextMessages: 8,
 });
 
@@ -119,8 +119,9 @@ function getSettings() {
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         if (settings[key] === undefined) settings[key] = structuredClone(value);
     }
-    // 구버전(700토큰 상한) 설정 마이그레이션 — 잘림 방지
-    if (Number(settings.refineMaxTokens) < SAFETY_LIMIT) settings.refineMaxTokens = SAFETY_LIMIT;
+    // 마이그레이션: 구버전 700(잘림)·1000000(백엔드 거부) → 20000
+    const refineTokens = Number(settings.refineMaxTokens);
+    if (!(refineTokens >= 2000 && refineTokens <= 65536)) settings.refineMaxTokens = 20000;
     return settings;
 }
 
@@ -671,6 +672,11 @@ function refinePromptMessages() {
     ];
 }
 
+// 백엔드가 토큰 상한 값을 거부한 오류인지 (Gemini: "supported range is from 1 to 65537" 등)
+function isTokenLimitError(error) {
+    return /max_?output_?tokens|max_tokens|maxOutputTokens|supported range|output token/i.test(String(error?.message ?? error ?? ''));
+}
+
 async function requestRefine(signal) {
     const context = getContext();
     const settings = getSettings();
@@ -678,20 +684,32 @@ async function requestRefine(signal) {
     const maxTokens = Number(settings.refineMaxTokens) || DEFAULT_SETTINGS.refineMaxTokens;
     const profileId = String(settings.refineProfileId ?? '').trim();
 
-    if (profileId) {
-        const service = context.ConnectionManagerRequestService;
-        if (!service || typeof service.sendRequest !== 'function') {
-            throw new Error('Connection Profiles 서비스를 사용할 수 없습니다.');
+    // 상한을 거부하는 백엔드를 만나면 더 작은 값으로 자동 재시도
+    const ladder = [...new Set([maxTokens, 20000, 8000, 4000].filter((value) => Number(value) > 0))];
+    let lastError;
+    for (const tokens of ladder) {
+        try {
+            if (profileId) {
+                const service = context.ConnectionManagerRequestService;
+                if (!service || typeof service.sendRequest !== 'function') {
+                    throw new Error('Connection Profiles 서비스를 사용할 수 없습니다.');
+                }
+                const result = await service.sendRequest(profileId, prompt, tokens, { stream: false, signal, extractData: true });
+                if (typeof result === 'string') return result;
+                if (result && typeof result.content === 'string') return result.content;
+                throw new Error('보정 분석 연결 프로필이 텍스트를 반환하지 않았습니다.');
+            }
+            if (typeof context.generateRaw !== 'function') {
+                throw new Error('현재 연결을 통한 백그라운드 생성을 사용할 수 없습니다.');
+            }
+            return await context.generateRaw({ prompt, responseLength: tokens, trimNames: false, signal });
+        } catch (error) {
+            lastError = error;
+            if (error?.name === 'AbortError' || !isTokenLimitError(error)) throw error;
+            console.warn(`${LOG_PREFIX} 토큰 상한 ${tokens}이(가) 거부됨 — 더 작은 값으로 재시도합니다.`);
         }
-        const result = await service.sendRequest(profileId, prompt, maxTokens, { stream: false, signal, extractData: true });
-        if (typeof result === 'string') return result;
-        if (result && typeof result.content === 'string') return result.content;
-        throw new Error('보정 분석 연결 프로필이 텍스트를 반환하지 않았습니다.');
     }
-    if (typeof context.generateRaw !== 'function') {
-        throw new Error('현재 연결을 통한 백그라운드 생성을 사용할 수 없습니다.');
-    }
-    return context.generateRaw({ prompt, responseLength: maxTokens, trimNames: false, signal });
+    throw lastError;
 }
 
 function parseRefineResponse(text) {
