@@ -98,6 +98,9 @@
         </div>
 
         <div class="tns-button-row">
+          <button id="tns-force-arm" class="menu_button" type="button">
+            <i class="fa-solid fa-bolt" aria-hidden="true"></i> <span id="tns-force-arm-label">지금 개입</span>
+          </button>
           <button id="tns-refine" class="menu_button" type="button">
             <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> 상태 다시 분석
           </button>
@@ -172,8 +175,9 @@
         <label class="tns-field" for="tns-pace-mode">
           <span>진행 속도</span>
           <select id="tns-pace-mode" class="text_pole">
+            <option value="auto">자동 (온도 연동, 추천) — 달아오를 땐 전진, 절정 직전엔 가속, 정점에선 유지</option>
             <option value="hold">지금 단계 유지 — 깊이만 더하기</option>
-            <option value="slow">자연스럽게 다음 단계로 (추천)</option>
+            <option value="slow">자연스럽게 다음 단계로</option>
             <option value="push">적극적으로 진도 빼기</option>
           </select>
         </label>
@@ -196,6 +200,16 @@
             <option value="internal">심리 위주 — 속마음이 계속 보이게</option>
           </select>
         </label>
+
+        <div class="tns-field">
+          <span>전역 하드 리밋 (모든 채팅 공통)</span>
+          <div class="tns-custom-ban-row">
+            <input id="tns-global-ban-input" type="text" class="text_pole" placeholder="절대 보고 싶지 않은 전개·소재 입력">
+            <button id="tns-global-ban-add" class="menu_button" type="button">추가</button>
+          </div>
+          <div id="tns-global-ban-list" class="tns-acts-list"></div>
+          <small>여기 등록한 건 어떤 캐릭터·채팅에서든 무장 장면에 "절대 금지"로 주입돼요. 채팅별 금지(장면 상태 탭)와 달리 한 번만 등록하면 돼요.</small>
+        </div>
 
         <label class="tns-setting-row" for="tns-exit-bridge">
           <span>

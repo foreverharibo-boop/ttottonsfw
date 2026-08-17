@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.8.0';
+const EXTENSION_VERSION = '0.9.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -79,7 +79,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     nextBeatHints: true,
     repeatWindow: 3,
     maxBannedActs: 15, // 반복 금지 목록 총량 상한 — 넘치면 오래된 것부터 제외
-    paceMode: 'slow',
+    paceMode: 'slow', // 'auto'(온도 연동) | 'hold' | 'slow' | 'push'
+    globalBans: [], // 전역 하드 리밋 — 모든 채팅의 무장 장면에 절대 금지로 주입
     styleLength: 'normal', // 'tight' | 'normal' | 'long' — 무장 중 응답 길이
     styleBalance: 'balanced', // 'dialogue' | 'balanced' | 'sensory' | 'internal' — 무장 중 묘사 밸런스
     exitBridge: true, // 해제 직후 한 번, 장면 마무리 지시 주입
@@ -220,6 +221,42 @@ function stealthColdStreak(k = STEALTH_COLD_STREAK) {
     const recent = chat.filter((message) => message && !message.is_system).slice(-k);
     if (recent.length < k) return false;
     return recent.every((message) => nsfwScore(stripStateTag(message.mes)) === 0);
+}
+
+// 원탭 강제 무장/해제 — 스텔스 감지가 놓쳤을 때(은유적 장면 등)의 수동 오버라이드
+function forceToggleArm() {
+    const settings = getSettings();
+    if (!settings.enabled || !settings.adultConfirmed) {
+        toastr.warning('전체 사용과 성인 캐릭터 확인을 먼저 켜주세요.', '🔞또또NSFW');
+        return;
+    }
+    const meta = getChatMeta();
+    if (settings.armMode === 'manual') {
+        meta.enabled = !meta.enabled;
+        saveChatMeta();
+        toastr.info(meta.enabled ? '이 채팅에서 개입을 시작해요.' : '이 채팅에서 개입을 껐어요.', '🔞또또NSFW');
+        updateUi();
+        return;
+    }
+    if (!meta.enabled) meta.enabled = true; // 채팅 토글이 꺼져 있었으면 같이 켠다
+    if (meta.autoArmed) {
+        meta.autoArmed = false;
+        meta.forceArmed = false;
+        meta.bridgePending = true;
+        const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+        meta.stealthCooldownFrom = chat.length;
+        toastr.info('개입을 해제하고 대기로 돌아가요.', '🔞또또NSFW');
+    } else {
+        meta.autoArmed = true;
+        meta.forceArmed = true; // 강제 무장 중엔 "신호 없음"을 이유로 자동 해제하지 않음 (온도 해제는 유효)
+        toastr.info('지금부터 연속성 개입을 시작해요.', '🔞또또NSFW');
+        if (settings.autoRefine) {
+            clearTimeout(refineTimer);
+            refineTimer = setTimeout(() => { void runRefine(); }, 300);
+        }
+    }
+    saveChatMeta();
+    updateUi();
 }
 
 // 스텔스 모드에서 NSFW 신호가 기준을 넘으면 무장. 주입도 호출도 없이 로컬 스캔만 사용.
@@ -471,12 +508,27 @@ function nextBeatCandidates() {
             .flatMap((act) => [biText(act, 'en').toLocaleLowerCase(), biText(act, 'ko').toLocaleLowerCase()])
             .filter(Boolean),
     );
-    const customBans = new Set((getChatMeta(false)?.customBans ?? []).map((ban) => String(ban).toLocaleLowerCase()));
+    const customBans = new Set([
+        ...(getChatMeta(false)?.customBans ?? []),
+        ...(getSettings().globalBans ?? []),
+    ].map((ban) => String(ban).toLocaleLowerCase()));
     return state.next.filter((beat) => {
         if (isActIgnored(beat, ignored)) return false;
         if (customBans.has(biText(beat, 'en').toLocaleLowerCase()) || customBans.has(biText(beat, 'ko').toLocaleLowerCase())) return false;
         return !banned.has(biText(beat, 'en').toLocaleLowerCase()) && !banned.has(biText(beat, 'ko').toLocaleLowerCase());
     });
+}
+
+// 진행 속도 결정 — 'auto'면 온도 곡선이 지휘: 달아오르는 중(~7)엔 전진, 절정 직전(8~9)엔 가속, 정점(10)엔 유지·심화
+function resolvePace(settings, state) {
+    if (settings.paceMode !== 'auto') {
+        return PACE_INSTRUCTIONS[settings.paceMode] ?? PACE_INSTRUCTIONS.slow;
+    }
+    const heat = Number(state?.heat);
+    if (!Number.isFinite(heat)) return PACE_INSTRUCTIONS.slow;
+    if (heat >= 10) return PACE_INSTRUCTIONS.hold;
+    if (heat >= 8) return PACE_INSTRUCTIONS.push;
+    return PACE_INSTRUCTIONS.slow;
 }
 
 const STATE_REPORT_LINES = [
@@ -508,7 +560,7 @@ function buildInjection() {
     }
 
     const actRows = recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow);
-    const pace = PACE_INSTRUCTIONS[settings.paceMode] ?? PACE_INSTRUCTIONS.slow;
+    const pace = resolvePace(settings, state);
 
     const sections = ['[Scene Continuity Directive]'];
 
@@ -523,6 +575,10 @@ function buildInjection() {
     }
 
     const customBans = (getChatMeta(false)?.customBans ?? []).filter(Boolean);
+    const globalBans = (settings.globalBans ?? []).filter(Boolean);
+    if (globalBans.length) {
+        sections.push('', `HARD LIMITS (absolute — never do, suggest, or depict these under any circumstances): ${globalBans.join(', ')}`);
+    }
     if (actRows.length || customBans.length) {
         sections.push('');
         if (actRows.length) {
@@ -751,6 +807,7 @@ function handleIncomingMessage(index) {
             }
         } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF) {
             meta.autoArmed = false;
+            meta.forceArmed = false;
             meta.bridgePending = true; // 다음 생성 한 번은 장면 마무리 지시
             if (settings.armMode === 'stealth') {
                 const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
@@ -762,7 +819,7 @@ function handleIncomingMessage(index) {
     }
     // 해제 폴백: 모델의 온도 보고와 무관하게, 최근 턴들이 연속으로 신호 0점이면 개입 해제
     // (모델이 온도를 계속 높게 불러서 일상 장면에까지 진행 지시가 들어가는 것 방지)
-    if (settings.armMode !== 'manual' && meta.autoArmed && stealthColdStreak()) {
+    if (settings.armMode !== 'manual' && meta.autoArmed && !meta.forceArmed && stealthColdStreak()) {
         meta.autoArmed = false;
         meta.bridgePending = true;
         const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
@@ -967,6 +1024,28 @@ function renderStatePanel() {
         customList.append(chip);
     }
 
+    // 전역 하드 리밋 목록
+    const globalList = element('tns-global-ban-list');
+    globalList.replaceChildren();
+    for (const ban of settings.globalBans ?? []) {
+        const chip = document.createElement('span');
+        chip.className = 'tns-act-chip tns-custom-chip';
+        const text = document.createElement('span');
+        text.textContent = ban;
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.title = '하드 리밋 해제';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => {
+            const current = getSettings();
+            current.globalBans = (current.globalBans ?? []).filter((item) => item !== ban);
+            saveSettings();
+            updateUi();
+        });
+        chip.append(text, remove);
+        globalList.append(chip);
+    }
+
     // 스텔스 감지 점수 뷰어
     const scoreBox = element('tns-score-box');
     if (settings.armMode === 'stealth' && isSupervising()) {
@@ -1037,6 +1116,7 @@ function updateUi() {
                                 : '장면을 지켜보는 중이에요';
 
         element('tns-refine').disabled = refineRunning;
+        element('tns-force-arm-label').textContent = isFullyArmed() ? '개입 해제' : '지금 개입';
         renderStatePanel();
 
         const preview = element('tns-prompt-preview');
@@ -1122,6 +1202,23 @@ function bindUi() {
     });
 
     element('tns-refine').addEventListener('click', () => { void runRefine({ manual: true }); });
+    element('tns-force-arm').addEventListener('click', forceToggleArm);
+
+    const addGlobalBan = () => {
+        const input = element('tns-global-ban-input');
+        const value = input.value.trim();
+        if (!value) return;
+        const settings = getSettings();
+        if (!Array.isArray(settings.globalBans)) settings.globalBans = [];
+        if (!settings.globalBans.includes(value)) settings.globalBans.push(value);
+        input.value = '';
+        saveSettings();
+        updateUi();
+    };
+    element('tns-global-ban-add').addEventListener('click', addGlobalBan);
+    element('tns-global-ban-input').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); addGlobalBan(); }
+    });
 
     const addCustomBan = () => {
         const input = element('tns-custom-ban-input');
