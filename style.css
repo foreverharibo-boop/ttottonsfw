@@ -239,6 +239,49 @@
     font-size: 0.78em;
 }
 
+.ttotto-nsfw-settings .tns-slow-burn-card {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 9px;
+    border-radius: 8px;
+    background: color-mix(in srgb, darkorange 10%, transparent);
+    border: 1px solid color-mix(in srgb, darkorange 32%, transparent);
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-card[hidden] {
+    display: none;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-card > small,
+.ttotto-nsfw-settings .tns-slow-burn-head small {
+    display: block;
+    opacity: 0.68;
+    font-size: 0.78em;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-stage {
+    font-weight: 500;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-controls .menu_button {
+    width: 100%;
+    min-width: 0;
+}
+
 .ttotto-nsfw-settings .tns-custom-ban-row {
     display: flex;
     gap: 6px;

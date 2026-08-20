@@ -37,6 +37,23 @@
           <button id="tns-toggle-preview" class="menu_button" type="button">주입문 보기</button>
         </div>
 
+        <div id="tns-slow-burn-card" class="tns-slow-burn-card" hidden>
+          <div class="tns-slow-burn-head">
+            <div>
+              <strong>🔥 슬로우번 <span id="tns-slow-burn-stage" class="tns-slow-burn-stage">1단계 · 긴장과 분위기 형성</span></strong>
+              <small id="tns-slow-burn-progress">현재 단계 체류 0/2턴</small>
+            </div>
+            <span id="tns-slow-burn-source" class="tns-count">자동 감지</span>
+          </div>
+          <div class="tns-slow-burn-controls">
+            <button id="tns-slow-burn-prev" class="menu_button" type="button" title="이전 단계">◀ 이전</button>
+            <button id="tns-slow-burn-lock" class="menu_button" type="button">🔒 단계 고정</button>
+            <button id="tns-slow-burn-next" class="menu_button" type="button" title="다음 단계">다음 ▶</button>
+            <button id="tns-slow-burn-auto" class="menu_button" type="button">자동 감지</button>
+          </div>
+          <small>같은 행동을 반복시키는 기능이 아니라, 각 단계 안에서 새로운 반응과 전개를 쌓으며 급전개를 막아요.</small>
+        </div>
+
         <label class="tns-field" for="tns-state-location">
           <span>장소</span>
           <input id="tns-state-location" type="text" class="text_pole" placeholder="예: 침실 침대 위">
@@ -180,6 +197,33 @@
             <option value="slow">자연스럽게 다음 단계로</option>
             <option value="push">적극적으로 진도 빼기</option>
           </select>
+          <small id="tns-pace-mode-note">슬로우번을 켜면 이 설정 대신 단계별 진행 제한이 적용돼요.</small>
+        </label>
+
+        <label class="tns-setting-row" for="tns-slow-burn-enabled">
+          <span>
+            <strong>🔥 슬로우번</strong>
+            <small>단계마다 일정 턴 머물며 한 답변에 한 단계 이상 급발진하지 않게 해요</small>
+          </span>
+          <input id="tns-slow-burn-enabled" type="checkbox">
+        </label>
+
+        <label class="tns-field" for="tns-slow-burn-intensity">
+          <span>슬로우번 강도</span>
+          <select id="tns-slow-burn-intensity" class="text_pole">
+            <option value="gentle">은은하게 — 단계마다 최소 1턴</option>
+            <option value="slow">느리게 (추천) — 단계마다 최소 2턴</option>
+            <option value="verySlow">아주 느리게 — 단계마다 최소 3턴</option>
+          </select>
+          <small>최소 턴을 채워도 반드시 다음 단계로 가는 건 아니며, 자연스러울 때만 한 단계 전진해요.</small>
+        </label>
+
+        <label class="tns-setting-row" for="tns-slow-burn-user-override">
+          <span>
+            <strong>사용자 주도 전개 허용</strong>
+            <small>내가 먼저 명확하게 다음 행동을 시작하면 단계 제한보다 우선해 자연스럽게 따라와요</small>
+          </span>
+          <input id="tns-slow-burn-user-override" type="checkbox">
         </label>
 
         <label class="tns-field" for="tns-style-length">

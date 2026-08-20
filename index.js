@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.9.2';
+const EXTENSION_VERSION = '0.10.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -26,6 +26,23 @@ const PACE_INSTRUCTIONS = Object.freeze({
     hold: 'Maintain the current stage of the scene. Deepen sensation and reaction without jumping ahead.',
     slow: 'Move the scene forward to its next natural beat. Advance gradually — one meaningful step per response.',
     push: 'Actively escalate. Each response must clearly progress the scene beyond where the previous one ended.',
+});
+
+// 슬로우번 단계 — 행위 자체가 아니라 장면의 서사적 진행도를 추적한다.
+const SLOW_BURN_STAGES = Object.freeze([
+    null,
+    { en: 'Tension and atmosphere', ko: '긴장과 분위기 형성' },
+    { en: 'Approach through gaze, words, and proximity', ko: '시선·말·거리 좁히기' },
+    { en: 'Initial light contact', ko: '가벼운 접촉' },
+    { en: 'Deepening contact and reactions', ko: '접촉과 반응 심화' },
+    { en: 'Explicit escalation', ko: '본격적인 전개' },
+    { en: 'Peak or conclusion permitted', ko: '마무리 허용' },
+]);
+
+const SLOW_BURN_MIN_TURNS = Object.freeze({
+    gentle: 1,
+    slow: 2,
+    verySlow: 3,
 });
 
 // 장면 스타일 다이얼 — 무장 중에만 적용
@@ -80,6 +97,9 @@ const DEFAULT_SETTINGS = Object.freeze({
     repeatWindow: 3,
     maxBannedActs: 15, // 반복 금지 목록 총량 상한 — 넘치면 오래된 것부터 제외
     paceMode: 'slow', // 'auto'(온도 연동) | 'hold' | 'slow' | 'push'
+    slowBurnEnabled: false,
+    slowBurnIntensity: 'slow', // 'gentle'(단계당 1턴) | 'slow'(2턴) | 'verySlow'(3턴)
+    slowBurnUserOverride: true, // 사용자가 직접 다음 단계 행동을 시작하면 제한보다 우선
     globalBans: [], // 전역 하드 리밋 — 모든 채팅의 무장 장면에 절대 금지로 주입
     styleLength: 'normal', // 'tight' | 'normal' | 'long' — 무장 중 응답 길이
     styleBalance: 'balanced', // 'dialogue' | 'balanced' | 'sensory' | 'internal' — 무장 중 묘사 밸런스
@@ -122,6 +142,7 @@ function getSettings() {
     // 마이그레이션: 구버전 700(잘림)·1000000(백엔드 거부) → 20000
     const refineTokens = Number(settings.refineMaxTokens);
     if (!(refineTokens >= 2000 && refineTokens <= 65536)) settings.refineMaxTokens = 20000;
+    if (!Object.prototype.hasOwnProperty.call(SLOW_BURN_MIN_TURNS, settings.slowBurnIntensity)) settings.slowBurnIntensity = 'slow';
     return settings;
 }
 
@@ -134,7 +155,14 @@ function getChatMeta(create = true) {
     if (!context.chatMetadata || typeof context.chatMetadata !== 'object') return null;
     if (!context.chatMetadata[CHAT_STATE_KEY]) {
         if (!create) return null;
-        context.chatMetadata[CHAT_STATE_KEY] = { enabled: false, manualState: null, ignoredActs: [], autoArmed: false };
+        context.chatMetadata[CHAT_STATE_KEY] = {
+            enabled: false,
+            manualState: null,
+            ignoredActs: [],
+            autoArmed: false,
+            slowBurnStageOverride: null,
+            slowBurnLocked: false,
+        };
     }
     const meta = context.chatMetadata[CHAT_STATE_KEY];
     if (!Array.isArray(meta.ignoredActs)) meta.ignoredActs = [];
@@ -309,7 +337,7 @@ function hasBi(bi) {
 
 function sanitizeState(raw) {
     if (!raw || typeof raw !== 'object') return null;
-    const clean = { location: { en: '', ko: '' }, characters: {}, acts: [] };
+    const clean = { location: { en: '', ko: '' }, characters: {}, acts: [], stage: null };
     clean.location = toBi(raw.location);
     const characters = raw.characters && typeof raw.characters === 'object' ? raw.characters : {};
     for (const [name, info] of Object.entries(characters).slice(0, 64)) {
@@ -324,10 +352,12 @@ function sanitizeState(raw) {
     clean.acts = acts.map(toBi).filter(hasBi).slice(0, 64);
     const heat = Number(raw.heat);
     clean.heat = Number.isFinite(heat) ? Math.max(0, Math.min(10, Math.round(heat))) : null;
+    const stage = raw.stage === null || raw.stage === undefined ? NaN : Number(raw.stage);
+    clean.stage = Number.isFinite(stage) ? Math.max(1, Math.min(6, Math.round(stage))) : null;
     const next = Array.isArray(raw.next) ? raw.next : [];
     clean.next = next.map(toBi).filter(hasBi).slice(0, 8);
     const hasCharacters = Object.values(clean.characters).some((info) => hasBi(info.clothing) || hasBi(info.position) || hasBi(info.contact));
-    if (!hasBi(clean.location) && !hasCharacters && !clean.acts.length && clean.heat === null && !clean.next.length) return null;
+    if (!hasBi(clean.location) && !hasCharacters && !clean.acts.length && clean.heat === null && clean.stage === null && !clean.next.length) return null;
     return clean;
 }
 
@@ -532,12 +562,107 @@ function resolvePace(settings, state) {
     return PACE_INSTRUCTIONS.slow;
 }
 
+function stageFromState(state) {
+    const reported = state?.stage === null || state?.stage === undefined ? NaN : Number(state.stage);
+    if (Number.isFinite(reported)) return Math.max(1, Math.min(6, Math.round(reported)));
+    const heat = Number(state?.heat);
+    if (!Number.isFinite(heat)) return 1;
+    if (heat >= 10) return 6;
+    if (heat >= 8) return 5;
+    if (heat >= 7) return 4;
+    if (heat >= 5) return 3;
+    if (heat >= 3) return 2;
+    return 1;
+}
+
+function slowBurnStageInfo() {
+    const meta = getChatMeta(false);
+    const override = Number(meta?.slowBurnStageOverride);
+    if (Number.isFinite(override) && override >= 1 && override <= 6) {
+        return { stage: Math.round(override), source: 'manual' };
+    }
+    const { state } = effectiveState();
+    if (state?.stage !== null && state?.stage !== undefined && Number.isFinite(Number(state.stage))) {
+        return { stage: stageFromState(state), source: 'reported' };
+    }
+    if (state?.heat !== null && state?.heat !== undefined && Number.isFinite(Number(state.heat))) {
+        return { stage: stageFromState(state), source: 'heat' };
+    }
+    return { stage: 1, source: 'default' };
+}
+
+function consecutiveSlowBurnTurns(stage) {
+    let turns = 0;
+    const messages = assistantMessages();
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const snapshot = snapshotForMessage(messages[i]);
+        if (!snapshot?.state) break;
+        if (stageFromState(snapshot.state) !== stage) break;
+        turns++;
+    }
+    return turns;
+}
+
+function slowBurnProgress(settings = getSettings()) {
+    const { stage, source } = slowBurnStageInfo();
+    const requiredTurns = SLOW_BURN_MIN_TURNS[settings.slowBurnIntensity] ?? SLOW_BURN_MIN_TURNS.slow;
+    const turns = consecutiveSlowBurnTurns(stage);
+    const locked = Boolean(getChatMeta(false)?.slowBurnLocked);
+    const canAdvance = !locked && stage < 6 && turns >= requiredTurns;
+    return {
+        stage,
+        source,
+        turns,
+        requiredTurns,
+        locked,
+        maxStage: canAdvance ? Math.min(6, stage + 1) : stage,
+    };
+}
+
+function buildSlowBurnLines(settings) {
+    const progress = slowBurnProgress(settings);
+    const current = SLOW_BURN_STAGES[progress.stage];
+    const maximum = SLOW_BURN_STAGES[progress.maxStage];
+    const remaining = Math.max(0, progress.requiredTurns - progress.turns);
+    const lines = [
+        '[Slow-Burn Progression — higher priority than the general pacing control]',
+        `CURRENT STAGE ${progress.stage}/6: ${current.en}.`,
+        `MAXIMUM CHARACTER-INITIATED STAGE THIS RESPONSE: ${progress.maxStage}/6 (${maximum.en}).`,
+        'Advance by at most one stage per response. Never begin and complete a new stage in the same response. Add one meaningful new beat while giving the current beat room to breathe.',
+        'Slow burn means fresh tension, dialogue, reaction, and sensory detail — not repeating the same action, freezing the scene, padding, or rephrasing what already happened.',
+        'Do not autonomously skip ahead, conclude the intimate scene, jump forward in time, or summarize omitted progression before stage 6.',
+    ];
+    if (progress.locked) {
+        lines.push('STAGE LOCKED BY USER: remain within the current stage until the lock is released. Deepen it without escalating or regressing.');
+    } else if (remaining > 0 && progress.stage < 6) {
+        lines.push(`Remain in the current stage for at least ${remaining} more CHARACTER response(s) before autonomously entering the next stage.`);
+    } else if (progress.stage < 6) {
+        lines.push('You may enter the next stage if it follows naturally, but you are not required to do so.');
+    } else {
+        lines.push('The final stage permits a peak or conclusion, but does not require one. Let character behavior and the user lead.');
+    }
+    if (settings.slowBurnUserOverride) {
+        lines.push('USER-LED OVERRIDE: if the USER explicitly requests, initiates, or has already established a later-stage action, follow it naturally. The stage cap restricts only autonomous CHARACTER escalation; never undo, refuse, or evade an explicit USER-led development. Mere passive reaction is not an override.');
+    }
+    const overrideNote = settings.slowBurnUserOverride ? ', except for an explicit USER-led override' : '';
+    lines.push(`In the hidden state report, set "stage" to the stage actually reached at the END of the response (integer 1-6; current cap ${progress.maxStage}${overrideNote}).`);
+    return lines;
+}
+
 const STATE_REPORT_LINES = [
     'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
     '<scene_state>{"location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
     'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
     '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
     '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
+];
+
+const SLOW_BURN_STATE_REPORT_LINES = [
+    'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
+    '<scene_state>{"location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"stage":1,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
+    'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
+    '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
+    '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). "stage" is the slow-burn progression stage as an integer from 1 to 6. Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
 ];
 
 // 감시 모드 전용 초경량 주입 — 장면 온도 한 줄만 요청 (SFW 장면에는 개입하지 않음)
@@ -604,7 +729,8 @@ function buildInjection() {
         }
     }
 
-    sections.push('', `PACING: ${pace}`);
+    if (settings.slowBurnEnabled) sections.push('', ...buildSlowBurnLines(settings));
+    else sections.push('', `PACING: ${pace}`);
 
     const styleParts = [
         STYLE_LENGTH_INSTRUCTIONS[settings.styleLength] ?? '',
@@ -612,7 +738,7 @@ function buildInjection() {
     ].filter(Boolean);
     if (styleParts.length) sections.push('', ...styleParts);
 
-    sections.push('', ...STATE_REPORT_LINES);
+    sections.push('', ...(settings.slowBurnEnabled ? SLOW_BURN_STATE_REPORT_LINES : STATE_REPORT_LINES));
 
     return sections.join('\n');
 }
@@ -664,7 +790,24 @@ function buildRefineInput() {
 }
 
 function refinePromptMessages() {
-    const system = 'You are a scene-state tracker for an adult fiction roleplay log. All characters are adults. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.\n\nSchema:\n{"location":"short English phrase || 짧은 한국어 구","characters":{"name":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant beats from the most recent CHARACTER message only, each \'English || 한국어\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}\n\nRules:\n- Every string value is a bilingual pair: concise English first, then " || ", then natural Korean.\n- Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.\n- "acts" must cover only the final CHARACTER message. List ONLY substantive beats (physical/romantic/emotional developments); skip mundane logistics like snacks, drinks, blankets, or remote controls.\n- "heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday) to 10 (peak).\n- "next" must not repeat anything already listed in "acts".\n- Include every present character. Use the exact names from the log.\n- If something is unknown, use an empty string. Return the JSON object only.';
+    const slowBurnEnabled = getSettings().slowBurnEnabled;
+    const stageSchema = slowBurnEnabled ? ',"stage":1' : '';
+    const stageRule = slowBurnEnabled
+        ? '\n- "stage" is the scene\'s slow-burn progression as an integer: 1 tension/atmosphere, 2 gaze/words/proximity, 3 initial light contact, 4 deepening contact/reactions, 5 explicit escalation, 6 peak or conclusion permitted.'
+        : '';
+    const system = `You are a scene-state tracker for an adult fiction roleplay log. All characters are adults. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.
+
+Schema:
+{"location":"short English phrase || 짧은 한국어 구","characters":{"name":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant beats from the most recent CHARACTER message only, each 'English || 한국어'"],"heat":0${stageSchema},"next":["2-3 fresh beats the scene could move to next, each 'English || 한국어'"]}
+
+Rules:
+- Every string value is a bilingual pair: concise English first, then " || ", then natural Korean.
+- Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.
+- "acts" must cover only the final CHARACTER message. List ONLY substantive beats (physical/romantic/emotional developments); skip mundane logistics like snacks, drinks, blankets, or remote controls.
+- "heat" is the scene's current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak).${stageRule}
+- "next" must not repeat anything already listed in "acts".
+- Include every present character. Use the exact names from the log.
+- If something is unknown, use an empty string. Return the JSON object only.`;
     const user = `Log excerpt (oldest first):\n\n${buildRefineInput()}`;
     return [
         { role: 'system', content: system },
@@ -921,9 +1064,37 @@ function applyManualEdit(mutator) {
     updateUi();
 }
 
+function renderSlowBurnPanel(settings) {
+    const card = element('tns-slow-burn-card');
+    card.hidden = !settings.slowBurnEnabled;
+    if (card.hidden) return;
+
+    const progress = slowBurnProgress(settings);
+    const stage = SLOW_BURN_STAGES[progress.stage];
+    const sourceLabel = {
+        manual: '수동 선택',
+        reported: 'AI 단계 감지',
+        heat: '온도에서 감지',
+        default: '초기 단계',
+    }[progress.source] ?? '자동 감지';
+
+    element('tns-slow-burn-stage').textContent = `${progress.stage}단계 · ${stage.ko}`;
+    element('tns-slow-burn-progress').textContent = progress.locked
+        ? `단계 고정 중 · 현재 단계 체류 ${progress.turns}턴`
+        : progress.stage >= 6
+            ? `최종 단계 · 현재 단계 체류 ${progress.turns}턴`
+            : `현재 단계 체류 ${Math.min(progress.turns, progress.requiredTurns)}/${progress.requiredTurns}턴`;
+    element('tns-slow-burn-source').textContent = sourceLabel;
+    element('tns-slow-burn-lock').textContent = progress.locked ? '🔓 고정 해제' : '🔒 단계 고정';
+    element('tns-slow-burn-prev').disabled = progress.stage <= 1;
+    element('tns-slow-burn-next').disabled = progress.stage >= 6;
+    element('tns-slow-burn-auto').disabled = progress.source !== 'manual' && !progress.locked;
+}
+
 function renderStatePanel() {
     const { state, source } = effectiveState();
     const settings = getSettings();
+    renderSlowBurnPanel(settings);
     const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
     element('tns-state-source').textContent = refineRunning ? '보조 AI 분석 중…' : sourceLabel;
 
@@ -1111,6 +1282,15 @@ function updateUi() {
         element('tns-max-banned').value = String(settings.maxBannedActs);
         element('tns-max-banned-value').textContent = `${settings.maxBannedActs}개`;
         element('tns-pace-mode').value = String(settings.paceMode);
+        element('tns-pace-mode').disabled = Boolean(settings.slowBurnEnabled);
+        element('tns-pace-mode-note').textContent = settings.slowBurnEnabled
+            ? '슬로우번이 켜져 있어 현재는 단계별 진행 제한이 대신 적용돼요.'
+            : '슬로우번을 켜면 이 설정 대신 단계별 진행 제한이 적용돼요.';
+        element('tns-slow-burn-enabled').checked = Boolean(settings.slowBurnEnabled);
+        element('tns-slow-burn-intensity').value = String(settings.slowBurnIntensity);
+        element('tns-slow-burn-intensity').disabled = !settings.slowBurnEnabled;
+        element('tns-slow-burn-user-override').checked = Boolean(settings.slowBurnUserOverride);
+        element('tns-slow-burn-user-override').disabled = !settings.slowBurnEnabled;
         element('tns-style-length').value = String(settings.styleLength);
         element('tns-style-balance').value = String(settings.styleBalance);
         element('tns-exit-bridge').checked = Boolean(settings.exitBridge);
@@ -1193,6 +1373,9 @@ function bindUi() {
     bindSetting('tns-stealth-keywords', 'stealthKeywords', String);
     bindSetting('tns-next-hints', 'nextBeatHints', Boolean);
     bindSetting('tns-pace-mode', 'paceMode', String);
+    bindSetting('tns-slow-burn-enabled', 'slowBurnEnabled', Boolean);
+    bindSetting('tns-slow-burn-intensity', 'slowBurnIntensity', String);
+    bindSetting('tns-slow-burn-user-override', 'slowBurnUserOverride', Boolean);
     bindSetting('tns-style-length', 'styleLength', String);
     bindSetting('tns-style-balance', 'styleBalance', String);
     bindSetting('tns-exit-bridge', 'exitBridge', Boolean);
@@ -1236,6 +1419,35 @@ function bindUi() {
     element('tns-refine').addEventListener('click', () => { void runRefine({ manual: true }); });
     element('tns-force-arm').addEventListener('click', forceToggleArm);
 
+    const setSlowBurnStage = (offset) => {
+        const meta = getChatMeta();
+        const current = slowBurnStageInfo().stage;
+        meta.slowBurnStageOverride = Math.max(1, Math.min(6, current + offset));
+        saveChatMeta();
+        updateUi();
+    };
+    element('tns-slow-burn-prev').addEventListener('click', () => setSlowBurnStage(-1));
+    element('tns-slow-burn-next').addEventListener('click', () => setSlowBurnStage(1));
+    element('tns-slow-burn-lock').addEventListener('click', () => {
+        const meta = getChatMeta();
+        if (meta.slowBurnLocked) {
+            meta.slowBurnLocked = false;
+            meta.slowBurnStageOverride = null;
+        } else {
+            meta.slowBurnStageOverride = slowBurnStageInfo().stage;
+            meta.slowBurnLocked = true;
+        }
+        saveChatMeta();
+        updateUi();
+    });
+    element('tns-slow-burn-auto').addEventListener('click', () => {
+        const meta = getChatMeta();
+        meta.slowBurnStageOverride = null;
+        meta.slowBurnLocked = false;
+        saveChatMeta();
+        updateUi();
+    });
+
     const addGlobalBan = () => {
         const input = element('tns-global-ban-input');
         const value = input.value.trim();
@@ -1271,6 +1483,8 @@ function bindUi() {
         const meta = getChatMeta();
         meta.manualState = null;
         meta.ignoredActs = [];
+        meta.slowBurnStageOverride = null;
+        meta.slowBurnLocked = false;
         for (const message of assistantMessages()) {
             const store = getMessageStore(message, false);
             if (store) delete message.extra[MESSAGE_EXTRA_KEY];
@@ -1385,7 +1599,17 @@ async function initializeUi() {
     const container = document.getElementById('extensions_settings2') ?? document.getElementById('extensions_settings');
     if (!container) throw new Error('확장 설정 컨테이너를 찾을 수 없습니다.');
     container.insertAdjacentHTML('beforeend', html);
-    const required = ['tns-enabled', 'tns-adult-confirmed', 'tns-chat-enabled', 'tns-repeat-window', 'tns-pace-mode', 'tns-refine', 'tns-state-location'];
+    const required = [
+        'tns-enabled',
+        'tns-adult-confirmed',
+        'tns-chat-enabled',
+        'tns-repeat-window',
+        'tns-pace-mode',
+        'tns-slow-burn-enabled',
+        'tns-slow-burn-stage',
+        'tns-refine',
+        'tns-state-location',
+    ];
     const missing = required.filter((id) => !document.getElementById(id));
     if (missing.length) throw new Error(`설정 패널 요소 누락: ${missing.join(', ')}`);
     uiReady = true;
