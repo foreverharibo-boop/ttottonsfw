@@ -260,6 +260,45 @@
     font-size: 0.78em;
 }
 
+.ttotto-nsfw-settings .tns-slow-burn-target-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-radius: 7px;
+    background: color-mix(in srgb, darkorange 10%, transparent);
+    border: 1px solid color-mix(in srgb, darkorange 26%, transparent);
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-target-box > small {
+    opacity: 0.72;
+    font-size: 0.78em;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-target-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-target-row label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-target-row input {
+    width: 64px;
+    min-width: 64px;
+}
+
+.ttotto-nsfw-settings .tns-slow-burn-target-box.is-active {
+    border-color: color-mix(in srgb, orangered 70%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, orangered 18%, transparent) inset;
+}
+
 .ttotto-nsfw-settings .tns-slow-burn-head {
     display: flex;
     align-items: flex-start;

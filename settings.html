@@ -38,6 +38,22 @@
         </div>
 
         <div id="tns-slow-burn-card" class="tns-slow-burn-card" hidden>
+          <div class="tns-slow-burn-target-box">
+            <label class="tns-field" for="tns-slow-burn-target">
+              <span><strong>내가 보고 싶은 장면</strong></span>
+              <input id="tns-slow-burn-target" type="text" class="text_pole" maxlength="200" placeholder="예: 키스">
+            </label>
+            <div class="tns-slow-burn-target-row">
+              <label for="tns-slow-burn-target-turns">
+                <span>진행 횟수</span>
+                <input id="tns-slow-burn-target-turns" type="number" class="text_pole" min="1" max="20" step="1" value="3">
+                <span>회</span>
+              </label>
+              <button id="tns-slow-burn-target-start" class="menu_button" type="button">🔥 목표 시작</button>
+              <button id="tns-slow-burn-target-stop" class="menu_button" type="button">중지</button>
+            </div>
+            <small id="tns-slow-burn-target-status">장면과 횟수를 정하면 다음 AI 답변부터 정확히 그 횟수만큼 유지해요.</small>
+          </div>
           <div class="tns-slow-burn-head">
             <div>
               <strong>🔥 슬로우번 <span id="tns-slow-burn-stage" class="tns-slow-burn-stage">1단계 · 긴장과 분위기 형성</span></strong>
@@ -51,7 +67,7 @@
             <button id="tns-slow-burn-next" class="menu_button" type="button" title="다음 단계">다음 ▶</button>
             <button id="tns-slow-burn-auto" class="menu_button" type="button">자동 감지</button>
           </div>
-          <small>같은 행동을 반복시키는 기능이 아니라, 각 단계 안에서 새로운 반응과 전개를 쌓으며 급전개를 막아요.</small>
+          <small>목표 장면 진행 중에는 그 장면 자체를 유지하되, 매 답변의 대사·반응·세부 행동은 새롭게 전개해요.</small>
         </div>
 
         <label class="tns-field" for="tns-state-location">
@@ -211,11 +227,11 @@
         <label class="tns-field" for="tns-slow-burn-intensity">
           <span>슬로우번 강도</span>
           <select id="tns-slow-burn-intensity" class="text_pole">
-            <option value="gentle">은은하게 — 단계마다 최소 1턴</option>
-            <option value="slow">느리게 (추천) — 단계마다 최소 2턴</option>
-            <option value="verySlow">아주 느리게 — 단계마다 최소 3턴</option>
+            <option value="gentle">은은하게 — 최소 1턴 잠금</option>
+            <option value="slow">느리게 (추천) — 최소 2턴 잠금</option>
+            <option value="verySlow">아주 느리게 — 최소 3턴 잠금</option>
           </select>
-          <small>최소 턴을 채워도 반드시 다음 단계로 가는 건 아니며, 자연스러울 때만 한 단계 전진해요.</small>
+          <small>켜는 순간부터 새로 세고 각 단계에도 같은 턴 수를 적용해요. 최소 턴 전에는 현재 단계가 높아도 장면 종료·마무리·애프터로 넘어가지 못해요.</small>
         </label>
 
         <label class="tns-setting-row" for="tns-slow-burn-user-override">
