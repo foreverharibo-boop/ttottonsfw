@@ -1216,7 +1216,15 @@ async function runRefine({ manual = false } = {}) {
         const response = await requestRefine(refineAbortController.signal);
         const state = parseRefineResponse(response);
         const meta = getChatMeta();
-        meta.manualState = { state, at: Date.now(), source: 'ai-refine' };
+        const refinedAt = Date.now();
+        // 보정 결과를 최신 AI 메시지의 현재 스와이프에도 붙여야 반복 목록과 슬로우번 체류 턴이 정상 계산된다.
+        const latestMessage = assistantMessages().at(-1);
+        if (latestMessage) {
+            const store = getMessageStore(latestMessage);
+            store.swipes[String(currentSwipeIndex(latestMessage))] = { state, at: refinedAt };
+            persistChat();
+        }
+        meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
         saveChatMeta();
         if (manual) toastr.success('보조 AI가 장면 상태를 다시 잡았어요.', '🔞또또NSFW');
         return true;
@@ -1827,8 +1835,15 @@ function bindUi() {
         const meta = getChatMeta();
         const wasEnabled = Boolean(meta.enabled);
         meta.enabled = element('tns-chat-enabled').checked;
-        if (wasEnabled && !meta.enabled) meta.bridgePending = Boolean(getSettings().exitBridge);
-        else if (meta.enabled) meta.bridgePending = false;
+        if (wasEnabled && !meta.enabled) {
+            meta.bridgePending = Boolean(getSettings().exitBridge);
+            meta.autoArmed = false;
+            meta.forceArmed = false;
+            const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+            meta.stealthCooldownFrom = chat.length;
+        } else if (meta.enabled) {
+            meta.bridgePending = false;
+        }
         resetSlowBurnSession(meta);
         saveChatMeta();
         if (!meta.enabled) clearInjectedPrompt();
