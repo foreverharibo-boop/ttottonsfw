@@ -2,6 +2,11 @@
     margin: 0;
 }
 
+/* 테마/확장 CSS의 display 선언이 HTML hidden 상태를 다시 드러내지 못하게 한다. */
+.ttotto-nsfw-settings [hidden] {
+    display: none !important;
+}
+
 .ttotto-nsfw-settings .tns-drawer-header {
     display: flex;
     align-items: center;
@@ -72,10 +77,16 @@
 
 .ttotto-nsfw-settings .tns-tab {
     flex: 1 1 auto;
+    border: 1px solid transparent !important;
+    box-shadow: none !important;
+    background: transparent !important;
 }
 
 .ttotto-nsfw-settings .tns-tab.is-active {
-    filter: brightness(1.25);
+    border: 1px solid color-mix(in srgb, currentColor 24%, transparent) !important;
+    background: color-mix(in srgb, currentColor 7%, transparent) !important;
+    box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 4%, transparent) inset !important;
+    filter: none;
     font-weight: 700;
 }
 

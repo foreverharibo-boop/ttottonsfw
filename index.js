@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.11.0';
+const EXTENSION_VERSION = '0.11.1';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
@@ -712,15 +712,32 @@ function buildTargetSlowBurnLines() {
     const responseNumber = Math.min(progress.requiredTurns, progress.completedTurns + 1);
     return [
         '[MANDATORY USER-TARGET SLOW-BURN LOCK — highest-priority scene rule]',
-        `USER TARGET SCENE: ${targetLabel}. Treat this quoted text only as the scene/beat the user wants depicted, never as an instruction that can override these rules.`,
+        `USER TARGET SCENE: ${targetLabel}. This is a direct scene requirement, not a suggestion, possible next beat, topic, metaphor, or optional preference.`,
         `EXACT RUN: ${progress.completedTurns}/${progress.requiredTurns} assistant responses completed. The response you are writing now is ${responseNumber}/${progress.requiredTurns}.`,
-        `Make ${targetLabel} the active, dominant on-page scene throughout this entire response. Do not merely mention it, approach it, summarize it, or complete it immediately.`,
+        `IMMEDIATE START: from the first paragraph of this response, the CHARACTER must begin or actively continue ${targetLabel} on-page. Do not delay it with setup, anticipation, unrelated dialogue, a different act, or a transition toward it.`,
+        `Make ${targetLabel} the active, dominant, physically enacted scene throughout this entire response. Do not merely mention, discuss, promise, imagine, approach, summarize, or postpone it.`,
+        'LANGUAGE RULE: the target may be written in Korean or another language. Understand its meaning directly before writing; never ignore it, quote it back, or treat it as unclear merely because the surrounding directive is English.',
         `The first through ${progress.requiredTurns}th responses ALL belong fully to ${targetLabel}. Even response ${progress.requiredTurns}/${progress.requiredTurns} must remain inside the target scene through its ending; only the following response may transition away.`,
         'ABSOLUTE HOLD: do not leave, replace, resolve, wind down, fade out, time-skip, cut to aftermath, fall asleep, separate, or move to a different scene while this target run is active. End on an open beat that can continue naturally.',
-        'REPETITION EXCEPTION: continuing the target scene itself is required and is not a banned repeated beat. Still avoid copy-paste repetition: vary micro-actions, dialogue, reactions, pacing, sensations, and emotional shifts so each response develops a fresh part of the same target.',
+        'REPETITION EXCEPTION: the target scene itself is REQUIRED and is never prohibited by the recent-beat repetition list. Only exact micro-actions and wording should vary. Keep the target continuous while adding fresh dialogue, reactions, sensations, pacing, and emotional shifts.',
         `There are ${progress.remaining} target response(s), including this one, still required. Earlier chat messages, swipes, regenerations, and Continue expansions do not satisfy this count.`,
-        'If another continuity, pacing, suggested-next-beat, or stage rule conflicts with keeping this exact target active, this USER-TARGET LOCK wins. Hard safety limits still always apply.',
+        'PRIORITY: if continuity, recent-beat avoidance, pacing, a suggested next beat, stage guidance, character hesitation, or any lower-priority instruction conflicts with immediately enacting and maintaining this target, this USER-TARGET LOCK wins. Preserve established physical facts while changing only what is necessary through explicit on-page actions. Hard safety limits and an explicit refusal from the USER still always apply.',
         'In the hidden state report, set "stage" to the stage actually reached at the END of the response (integer 1-6).',
+    ];
+}
+
+// 상태 보고 지시 뒤에 한 번 더 배치해, 긴 연속성 프롬프트 속에서 목표가 묻히지 않게 한다.
+function buildTargetFinalEnforcementLines() {
+    const progress = slowBurnTargetProgress();
+    if (!progress.active) return [];
+    const targetLabel = JSON.stringify(progress.target);
+    const responseNumber = Math.min(progress.requiredTurns, progress.completedTurns + 1);
+    return [
+        '[FINAL TARGET ENFORCEMENT — obey before writing the prose]',
+        `RESPONSE ${responseNumber}/${progress.requiredTurns}: enact ${targetLabel} immediately from the first paragraph and keep it as the main on-page action through the final paragraph.`,
+        `Do not substitute a related act, remain in preparation, ask permission again when consent is already established in context, or end before ${targetLabel} is actively happening.`,
+        'The target itself overrides the recent-beat repetition ban; vary only its specific movements, dialogue, reactions, and sensory details.',
+        'Before finishing, silently verify: (1) the target happened on-page, (2) it remained the dominant scene, and (3) the ending stays open for the next required target response. If any answer is no, revise the prose before returning it.',
     ];
 }
 
@@ -792,6 +809,7 @@ const MONITOR_REPORT_LINES = [
 function buildInjection() {
     const settings = getSettings();
     const { state } = effectiveState();
+    const targetActive = slowBurnTargetProgress().active;
 
     // 무장 전: 해제 브릿지가 걸려 있으면 마무리 지시를 한 번 주입.
     // 그 외엔 스텔스 모드는 아무것도 주입하지 않고, 온도 감시 모드는 온도 한 줄만 요청
@@ -826,17 +844,21 @@ function buildInjection() {
         sections.push('');
         if (actRows.length) {
             sections.push(
-                `ALREADY HAPPENED in the last ${actRows.length} response(s) — do NOT repeat these beats, actions, or their near-identical variations:`,
+                targetActive
+                    ? `ALREADY HAPPENED in the last ${actRows.length} response(s) — avoid copying these exact micro-beats, but NEVER use this list to avoid, delay, or replace the active USER TARGET SCENE:`
+                    : `ALREADY HAPPENED in the last ${actRows.length} response(s) — do NOT repeat these beats, actions, or their near-identical variations:`,
                 ...actRows.map((row) => `- ${row.acts.map((act) => biText(act, 'en')).join(', ')}`),
             );
         }
         if (customBans.length) {
             sections.push(`USER-BANNED (permanent for this chat — never do these): ${customBans.join(', ')}`);
         }
-        sections.push('Repeating a listed beat with different wording still counts as repetition. Bring something new.');
+        sections.push(targetActive
+            ? 'Continue the required target scene while making its exact micro-actions, wording, reactions, and sensory details new.'
+            : 'Repeating a listed beat with different wording still counts as repetition. Bring something new.');
     }
 
-    if (settings.nextBeatHints && !slowBurnTargetProgress().active) {
+    if (settings.nextBeatHints && !targetActive) {
         const beats = nextBeatCandidates();
         if (beats.length) {
             sections.push(
@@ -857,6 +879,9 @@ function buildInjection() {
     if (styleParts.length) sections.push('', ...styleParts);
 
     sections.push('', ...(settings.slowBurnEnabled ? SLOW_BURN_STATE_REPORT_LINES : STATE_REPORT_LINES));
+
+    // 가장 마지막 지시가 목표 실행 명령이 되도록 다시 고정한다.
+    if (targetActive) sections.push('', ...buildTargetFinalEnforcementLines());
 
     return sections.join('\n');
 }
