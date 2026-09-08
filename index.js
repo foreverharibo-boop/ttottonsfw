@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.11.3';
+const EXTENSION_VERSION = '0.12.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -22,8 +22,8 @@ const DEVELOPER_PASSWORD = '130918';
 const PROMPT_POSITION_IN_CHAT = 1;
 const PROMPT_ROLE_SYSTEM = 0;
 
-const STATE_TAG_REGEX = /<scene_state>([\s\S]*?)<\/scene_state>/gi;
-const STATE_TAG_LOOSE_REGEX = /```(?:json)?\s*<scene_state>[\s\S]*?<\/scene_state>\s*```/gi;
+const STATE_TAG_REGEX = /<scene_state\b[^>]*>([\s\S]*?)<\/scene_state>/gi;
+const STATE_TAG_LOOSE_REGEX = /```(?:json)?\s*<scene_state\b[^>]*>[\s\S]*?<\/scene_state>\s*```/gi;
 
 const PACE_INSTRUCTIONS = Object.freeze({
     hold: 'Maintain the current stage of the scene. Deepen sensation and reaction without jumping ahead.',
@@ -80,6 +80,16 @@ const AUTO_ARM_OFF = 2;
 const STEALTH_WINDOW = 4; // 최근 몇 개 메시지를 스캔할지
 const STEALTH_THRESHOLDS = Object.freeze({ high: 4, normal: 6, low: 9 });
 const STEALTH_COLD_STREAK = 3; // 이 턴 수 연속 신호 0점이면 온도와 무관하게 개입 해제
+const REFINE_MESSAGE_CHAR_LIMIT = 12000;
+const REFINE_TOTAL_CHAR_LIMIT = 60000;
+
+const HEAT_SCALE_LINES = Object.freeze([
+    'HEAT SCALE (judge the scene facts at the END of the response, not isolated words or discussion):',
+    '- 0-1: ordinary/nonsexual; 2: mild flirting or romantic charge without sustained sexual contact.',
+    '- 3-4: kissing, close body contact, or clearly rising sexual tension.',
+    '- 5-6: unmistakable sexual touching/foreplay; this is the active-supervision threshold.',
+    '- 7-8: sustained explicit sexual activity or intensifying stimulation; 9: climax is imminent; 10: peak/climax or immediate conclusion.',
+]);
 const STEALTH_LEXICON = [
     // 강한 신호 (3점): 명시적 행위·신체
     { label: '명시적 표현', re: /삽입|절정|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|안에\s*들어오|안을\s*채우|몸\s*안에|하나가\s*되|thrust(?:ing|s)?|orgasm|climax|cock|pussy|nipple|entrance|inside\s+her|inside\s+him/gi, w: 3 },
@@ -92,6 +102,7 @@ const STEALTH_LEXICON = [
 ];
 
 const DEFAULT_SETTINGS = Object.freeze({
+    settingsSchemaVersion: 2,
     enabled: true,
     adultConfirmed: false,
     developerMode: false,
@@ -102,7 +113,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     nextBeatHints: true,
     repeatWindow: 3,
     maxBannedActs: 15, // 반복 금지 목록 총량 상한 — 넘치면 오래된 것부터 제외
-    paceMode: 'slow', // 'auto'(온도 연동) | 'hold' | 'slow' | 'push'
+    paceMode: 'auto', // 'auto'(온도 연동) | 'hold' | 'slow' | 'push'
     slowBurnEnabled: false,
     slowBurnIntensity: 'slow', // 'gentle'(단계당 1턴) | 'slow'(2턴) | 'verySlow'(3턴)
     slowBurnUserOverride: true, // 사용자가 직접 다음 단계 행동을 시작하면 제한보다 우선
@@ -112,7 +123,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     exitBridge: true, // 해제 직후 한 번, 장면 마무리 지시 주입
     autoRefine: true,
     refineProfileId: '',
-    refineMaxTokens: 20000, // 상한일 뿐 실제 소모와 무관 — 백만은 일부 백엔드(Gemini 등)가 거부하므로 2만으로
+    refineMaxTokens: 3000,
     refineContextMessages: 8,
 });
 
@@ -144,13 +155,22 @@ function getSettings() {
         context.extensionSettings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
     }
     const settings = context.extensionSettings[MODULE_NAME];
+    const previousSchemaVersion = Number(settings.settingsSchemaVersion) || 0;
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         if (settings[key] === undefined) settings[key] = structuredClone(value);
     }
-    // 마이그레이션: 구버전 700(잘림)·1000000(백엔드 거부) → 20000
+    // v2: UI 추천값과 실제 기본값을 자동으로 통일한다.
+    if (previousSchemaVersion < 2 && settings.paceMode === 'slow') settings.paceMode = 'auto';
+    settings.settingsSchemaVersion = 2;
+    // 상태 JSON은 짧으므로 과도한 출력 상한을 제한해 보조 호출 비용을 줄인다.
     const refineTokens = Number(settings.refineMaxTokens);
-    if (!(refineTokens >= 2000 && refineTokens <= 65536)) settings.refineMaxTokens = 20000;
+    settings.refineMaxTokens = Number.isFinite(refineTokens)
+        ? Math.min(4000, Math.max(1000, Math.round(refineTokens)))
+        : DEFAULT_SETTINGS.refineMaxTokens;
     if (!Object.prototype.hasOwnProperty.call(SLOW_BURN_MIN_TURNS, settings.slowBurnIntensity)) settings.slowBurnIntensity = 'slow';
+    if (previousSchemaVersion < 2 || settings.refineMaxTokens !== refineTokens) {
+        context.saveSettingsDebounced?.();
+    }
     return settings;
 }
 
@@ -329,8 +349,14 @@ function forceToggleArm() {
     }
     const meta = getChatMeta();
     if (settings.armMode === 'manual') {
-        meta.enabled = !meta.enabled;
-        if (!meta.enabled) resetSlowBurnSession(meta);
+        const wasEnabled = Boolean(meta.enabled);
+        meta.enabled = !wasEnabled;
+        if (!meta.enabled) {
+            meta.bridgePending = Boolean(settings.exitBridge);
+            resetSlowBurnSession(meta);
+        } else {
+            meta.bridgePending = false;
+        }
         saveChatMeta();
         if (meta.enabled && settings.slowBurnEnabled) startSlowBurnSessionIfNeeded();
         toastr.info(meta.enabled ? '이 채팅에서 개입을 시작해요.' : '이 채팅에서 개입을 껐어요.', '🔞또또NSFW');
@@ -341,7 +367,7 @@ function forceToggleArm() {
     if (meta.autoArmed) {
         meta.autoArmed = false;
         meta.forceArmed = false;
-        meta.bridgePending = true;
+        meta.bridgePending = Boolean(settings.exitBridge);
         resetSlowBurnSession(meta);
         const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
         meta.stealthCooldownFrom = chat.length;
@@ -432,6 +458,21 @@ function sanitizeState(raw) {
     return clean;
 }
 
+function stateCompletenessIssues(state, settings = getSettings()) {
+    if (!state) return ['state'];
+    const issues = [];
+    if (!hasBi(state.location)) issues.push('location');
+    const hasCharacterState = Object.values(state.characters ?? {}).some(
+        (info) => hasBi(info.clothing) || hasBi(info.position) || hasBi(info.contact),
+    );
+    if (!hasCharacterState) issues.push('characters');
+    if (!state.acts?.length) issues.push('acts');
+    if (state.heat === null || state.heat === undefined) issues.push('heat');
+    if (settings.slowBurnEnabled && (state.stage === null || state.stage === undefined)) issues.push('stage');
+    if (settings.nextBeatHints && !state.next?.length) issues.push('next');
+    return issues;
+}
+
 function parseStateFromText(text) {
     const source = String(text ?? '');
     let lastJson = null;
@@ -453,6 +494,11 @@ function stripStateTag(text) {
     return String(text ?? '')
         .replace(STATE_TAG_LOOSE_REGEX, '')
         .replace(STATE_TAG_REGEX, '')
+        // 스트리밍 중 잘렸거나 모델이 닫는 태그를 누락한 경우에도 기계용 내용이 본문에 노출되지 않게 제거한다.
+        .replace(/```(?:json)?\s*<scene_state\b[^>]*>[\s\S]*$/gi, '')
+        .replace(/<scene_state\b[^>]*>[\s\S]*$/gi, '')
+        .replace(/<\/scene_state>\s*```/gi, '')
+        .replace(/<\/scene_state>/gi, '')
         .replace(/\n{3,}$/g, '\n')
         .replace(/[ \t]+$/g, '')
         .trimEnd();
@@ -548,6 +594,56 @@ function isActIgnored(act, ignored) {
     return ignored.has(biText(act, 'en').toLocaleLowerCase()) || ignored.has(biText(act, 'ko').toLocaleLowerCase());
 }
 
+const ACT_STOP_WORDS = new Set([
+    'a', 'an', 'the', 'to', 'of', 'and', 'with', 'her', 'his', 'their', 'she', 'he', 'they',
+    '그', '그녀', '그의', '그녀의', '서로', '에게', '으로', '에서', '하다', '한다', '하며',
+]);
+
+function normalizeActText(value) {
+    return String(value ?? '')
+        .normalize('NFKC')
+        .toLocaleLowerCase()
+        .replace(/\b(kissing|kissed|kisses)\b/g, 'kiss')
+        .replace(/\b(touching|touched|touches)\b/g, 'touch')
+        .replace(/\b(licking|licked|licks)\b/g, 'lick')
+        .replace(/\b(holding|held|holds)\b/g, 'hold')
+        .replace(/\b(pulling|pulled|pulls)\b/g, 'pull')
+        .replace(/\b(pressing|pressed|presses)\b/g, 'press')
+        .replace(/\b(caressing|caressed|caresses)\b/g, 'caress')
+        .replace(/입(?:을|술을)?\s*(?:맞추\S*|맞대\S*)|입맞춤/g, '키스')
+        .replace(/끌어안\S*|껴안\S*/g, '포옹')
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .split(/\s+/)
+        .filter((token) => token && !ACT_STOP_WORDS.has(token))
+        .join(' ');
+}
+
+function actVariants(act) {
+    return [...new Set([biText(act, 'en'), biText(act, 'ko')].map(normalizeActText).filter(Boolean))];
+}
+
+function normalizedTextsSimilar(left, right) {
+    if (!left || !right) return false;
+    if (left === right) return true;
+    if (Math.min(left.length, right.length) >= 8 && (left.includes(right) || right.includes(left))) return true;
+    const leftTokens = new Set(left.split(' '));
+    const rightTokens = new Set(right.split(' '));
+    const smaller = Math.min(leftTokens.size, rightTokens.size);
+    if (smaller < 2) return false;
+    const overlap = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+    return overlap / smaller >= 0.72;
+}
+
+function actsAreSimilar(left, right) {
+    return actVariants(left).some((a) => actVariants(right).some((b) => normalizedTextsSimilar(a, b)));
+}
+
+function actMatchesPlainBan(act, ban) {
+    const normalizedBan = normalizeActText(ban);
+    if (!normalizedBan) return false;
+    return actVariants(act).some((variant) => normalizedTextsSimilar(variant, normalizedBan));
+}
+
 // 최근 N턴의 전개(행위) 목록 — 오래된 것 → 최신 순.
 // 총량이 maxBannedActs를 넘으면 오래된 것부터 잘라서 주입문 비대화를 막는다.
 function recentActs(windowSize) {
@@ -561,12 +657,11 @@ function recentActs(windowSize) {
         if (acts.length) rows.unshift({ turnsAgo: rows.length + 1, acts });
     }
     // 중복 제거 (같은 전개가 여러 턴에 반복 기록된 경우 최신 것만)
-    const seen = new Set();
+    const seenActs = [];
     for (let i = rows.length - 1; i >= 0; i--) {
         rows[i].acts = rows[i].acts.filter((act) => {
-            const key = (biText(act, 'en') || biText(act, 'ko')).toLocaleLowerCase();
-            if (seen.has(key)) return false;
-            seen.add(key);
+            if (seenActs.some((seen) => actsAreSimilar(act, seen))) return false;
+            seenActs.push(act);
             return true;
         });
     }
@@ -604,21 +699,21 @@ function nextBeatCandidates() {
     const { state } = effectiveState();
     if (!state?.next?.length) return [];
     const settings = getSettings();
-    const banned = new Set(
-        recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow)
-            .flatMap((row) => row.acts)
-            .flatMap((act) => [biText(act, 'en').toLocaleLowerCase(), biText(act, 'ko').toLocaleLowerCase()])
-            .filter(Boolean),
-    );
-    const customBans = new Set([
+    const bannedActs = recentActs(Number(settings.repeatWindow) || DEFAULT_SETTINGS.repeatWindow)
+        .flatMap((row) => row.acts);
+    const customBans = [
         ...(getChatMeta(false)?.customBans ?? []),
         ...(getSettings().globalBans ?? []),
-    ].map((ban) => String(ban).toLocaleLowerCase()));
-    return state.next.filter((beat) => {
-        if (isActIgnored(beat, ignored)) return false;
-        if (customBans.has(biText(beat, 'en').toLocaleLowerCase()) || customBans.has(biText(beat, 'ko').toLocaleLowerCase())) return false;
-        return !banned.has(biText(beat, 'en').toLocaleLowerCase()) && !banned.has(biText(beat, 'ko').toLocaleLowerCase());
-    });
+    ].map(String).filter(Boolean);
+    const accepted = [];
+    for (const beat of state.next) {
+        if (isActIgnored(beat, ignored)) continue;
+        if (customBans.some((ban) => actMatchesPlainBan(beat, ban))) continue;
+        if (bannedActs.some((act) => actsAreSimilar(beat, act))) continue;
+        if (accepted.some((candidate) => actsAreSimilar(beat, candidate))) continue;
+        accepted.push(beat);
+    }
+    return accepted;
 }
 
 // 진행 속도 결정 — 'auto'면 온도 곡선이 지휘: 달아오르는 중(~7)엔 전진, 절정 직전(8~9)엔 가속, 정점(10)엔 유지·심화
@@ -843,7 +938,8 @@ const STATE_REPORT_LINES = [
     '<scene_state>{"location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
     'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
     '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
-    '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
+    ...HEAT_SCALE_LINES,
+    'Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
 ];
 
 const SLOW_BURN_STATE_REPORT_LINES = [
@@ -851,14 +947,16 @@ const SLOW_BURN_STATE_REPORT_LINES = [
     '<scene_state>{"location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"stage":1,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
     'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
     '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
-    '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). "stage" is the slow-burn progression stage as an integer from 1 to 6. Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
+    ...HEAT_SCALE_LINES,
+    '"stage" is the slow-burn progression stage as an integer from 1 to 6. Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
 ];
 
 // 감시 모드 전용 초경량 주입 — 장면 온도 한 줄만 요청 (SFW 장면에는 개입하지 않음)
 const MONITOR_REPORT_LINES = [
     '[Scene Monitor] End your response with exactly one line in this format. It is machine-read and hidden from the reader — include it every time, and change nothing else about how you write:',
     '<scene_state>{"heat":0}</scene_state>',
-    '"heat" is the scene\'s current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak). Report it factually. Do not mention this line in your prose.',
+    ...HEAT_SCALE_LINES,
+    'Report "heat" factually. Do not mention this line in your prose.',
 ];
 
 function buildInjection() {
@@ -952,15 +1050,33 @@ function clearInjectedPrompt() {
 globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGenerationInterceptor(_chat, _contextSize, _abort, type) {
     clearInjectedPrompt();
     try {
-        if (!isSupervising()) return;
         if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) return;
+        const settings = getSettings();
+        const meta = getChatMeta(false);
+        // 채팅 토글로 수동 해제한 뒤에는 감시 자체가 꺼져도 다음 생성 한 번의 브릿지만 통과시킨다.
+        const bridgeOnly = Boolean(
+            runtimeActive
+            && settings.enabled
+            && settings.adultConfirmed
+            && settings.exitBridge
+            && meta?.bridgePending
+            && !isSupervising(),
+        );
+        if (bridgeOnly) {
+            const prompt = BRIDGE_LINES.join('\n');
+            getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
+            meta.bridgePending = false;
+            saveChatMeta();
+            console.debug(`${LOG_PREFIX} 수동 해제 브릿지 주입 (${prompt.length}자)`);
+            return;
+        }
+        if (!isSupervising()) return;
         maybeStealthArm(); // 방금 보낸 유저 메시지까지 반영해 생성 직전에 감지
-        if (getSettings().slowBurnEnabled && isFullyArmed()) startSlowBurnSessionIfNeeded();
+        if (settings.slowBurnEnabled && isFullyArmed()) startSlowBurnSessionIfNeeded();
         const prompt = buildInjection();
         if (!prompt) return;
         getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
         // 해제 브릿지는 딱 한 번만: 이번 생성에 실렸으면 플래그를 끈다 (미리보기는 소모하지 않음)
-        const meta = getChatMeta(false);
         if (meta?.bridgePending && !isFullyArmed()) {
             meta.bridgePending = false;
             saveChatMeta();
@@ -980,12 +1096,25 @@ function buildRefineInput() {
     const recent = chat
         .filter((message) => message && !message.is_system)
         .slice(-Math.max(2, Number(settings.refineContextMessages) || DEFAULT_SETTINGS.refineContextMessages));
-    return recent.map((message) => {
+    const rows = [];
+    let totalChars = 0;
+    for (let i = recent.length - 1; i >= 0; i--) {
+        const message = recent[i];
         const role = message.is_user ? 'USER' : 'CHARACTER';
         const name = String(message.name ?? '');
-        const text = stripStateTag(message.mes).slice(0, SAFETY_LIMIT);
-        return `[${role} | ${name}]\n${text}`;
-    }).join('\n\n');
+        const label = `[${role} | ${name}]`;
+        let messageText = stripStateTag(message.mes);
+        if (messageText.length > REFINE_MESSAGE_CHAR_LIMIT) {
+            messageText = `…${messageText.slice(-(REFINE_MESSAGE_CHAR_LIMIT - 1))}`;
+        }
+        const remaining = REFINE_TOTAL_CHAR_LIMIT - totalChars - label.length - 1;
+        if (remaining <= 1) break;
+        if (messageText.length > remaining) messageText = `…${messageText.slice(-(remaining - 1))}`;
+        const row = `${label}\n${messageText}`;
+        rows.unshift(row);
+        totalChars += row.length + 2;
+    }
+    return rows.join('\n\n');
 }
 
 function refinePromptMessages() {
@@ -1003,7 +1132,7 @@ Rules:
 - Every string value is a bilingual pair: concise English first, then " || ", then natural Korean.
 - Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.
 - "acts" must cover only the final CHARACTER message. List ONLY substantive beats (physical/romantic/emotional developments); skip mundane logistics like snacks, drinks, blankets, or remote controls.
-- "heat" is the scene's current erotic/tension intensity as an integer from 0 (everyday scene) to 10 (peak).${stageRule}
+${HEAT_SCALE_LINES.join('\n')}${stageRule}
 - "next" must not repeat anything already listed in "acts".
 - Include every present character. Use the exact names from the log.
 - If something is unknown, use an empty string. Return the JSON object only.`;
@@ -1027,7 +1156,9 @@ async function requestRefine(signal) {
     const profileId = String(settings.refineProfileId ?? '').trim();
 
     // 상한을 거부하는 백엔드를 만나면 더 작은 값으로 자동 재시도
-    const ladder = [...new Set([maxTokens, 20000, 8000, 4000].filter((value) => Number(value) > 0))];
+    const ladder = [...new Set([maxTokens, 2000, 1000]
+        .filter((value) => Number(value) > 0 && Number(value) <= maxTokens))]
+        .sort((left, right) => right - left);
     let lastError;
     for (const tokens of ladder) {
         try {
@@ -1187,7 +1318,7 @@ function handleIncomingMessage(index) {
             } else {
                 meta.autoArmed = false;
                 meta.forceArmed = false;
-                meta.bridgePending = true; // 다음 생성 한 번은 장면 마무리 지시
+                meta.bridgePending = Boolean(settings.exitBridge); // 다음 생성 한 번은 장면 마무리 지시
                 resetSlowBurnSession(meta);
                 if (settings.armMode === 'stealth') {
                     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
@@ -1213,7 +1344,7 @@ function handleIncomingMessage(index) {
             saveChatMeta();
         } else {
             meta.autoArmed = false;
-            meta.bridgePending = true;
+            meta.bridgePending = Boolean(settings.exitBridge);
             resetSlowBurnSession(meta);
             const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
             meta.stealthCooldownFrom = chat.length;
@@ -1225,8 +1356,11 @@ function handleIncomingMessage(index) {
         rerenderMessage(index, message);
         persistChat();
     }
-    if (!found) {
-        console.debug(`${LOG_PREFIX} 상태 태그 누락 — 보조 AI 보정 ${settings.autoRefine ? '예약' : '비활성'}`);
+    const completenessState = state ?? snapshotForMessage(message)?.state ?? null;
+    const completenessIssues = found ? stateCompletenessIssues(completenessState, settings) : [];
+    if (!found || completenessIssues.length) {
+        const reason = found ? `상태 태그 불완전 (${completenessIssues.join(', ')})` : '상태 태그 누락';
+        console.debug(`${LOG_PREFIX} ${reason} — 보조 AI 보정 ${settings.autoRefine ? '예약' : '비활성'}`);
         scheduleAutoRefine();
     }
     updateUi();
@@ -1691,7 +1825,10 @@ function bindUi() {
 
     element('tns-chat-enabled').addEventListener('change', () => {
         const meta = getChatMeta();
+        const wasEnabled = Boolean(meta.enabled);
         meta.enabled = element('tns-chat-enabled').checked;
+        if (wasEnabled && !meta.enabled) meta.bridgePending = Boolean(getSettings().exitBridge);
+        else if (meta.enabled) meta.bridgePending = false;
         resetSlowBurnSession(meta);
         saveChatMeta();
         if (!meta.enabled) clearInjectedPrompt();
