@@ -1299,12 +1299,17 @@ function applyManualEdit(mutator) {
 
 function renderSlowBurnPanel(settings) {
     const card = element('tns-slow-burn-card');
-    card.hidden = !settings.slowBurnEnabled;
+    const developerMode = Boolean(settings.developerMode);
+    card.hidden = !settings.slowBurnEnabled && !developerMode;
     if (card.hidden) return;
+
+    const stageHead = card.querySelector('.tns-slow-burn-head');
+    const stageControls = card.querySelector('.tns-slow-burn-controls');
+    if (stageHead) stageHead.hidden = !settings.slowBurnEnabled;
+    if (stageControls) stageControls.hidden = !settings.slowBurnEnabled;
 
     const progress = slowBurnProgress(settings);
     const targetProgress = progress.target;
-    const developerMode = Boolean(settings.developerMode);
     const targetInput = element('tns-slow-burn-target');
     const targetTurnsInput = element('tns-slow-burn-target-turns');
     element('tns-slow-burn-target-box').hidden = !developerMode;
@@ -1531,6 +1536,11 @@ function updateUi() {
         const settings = getSettings();
         const meta = getChatMeta(false);
 
+        const popupDeveloperTitle = element('tns-popup-developer-title');
+        if (popupDeveloperTitle) {
+            popupDeveloperTitle.textContent = settings.developerMode ? '🔞 또또NSFW 🧪' : '🔞 또또NSFW';
+        }
+
         element('tns-enabled').checked = Boolean(settings.enabled);
         element('tns-adult-confirmed').checked = Boolean(settings.adultConfirmed);
         element('tns-chat-enabled').checked = Boolean(meta?.enabled);
@@ -1728,8 +1738,8 @@ function bindUi() {
             return;
         }
         if (!settings.slowBurnEnabled) {
-            toastr.warning('슬로우번을 먼저 켜주세요.', '🔞또또NSFW');
-            return;
+            settings.slowBurnEnabled = true;
+            saveSettings();
         }
         const meta = getChatMeta();
         resetSlowBurnSession(meta);

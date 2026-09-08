@@ -21,6 +21,11 @@
     gap: 8px;
 }
 
+/* 팝업에는 전용 상단 제목줄이 있으므로 안쪽 확장 헤더를 중복 표시하지 않는다. */
+.ttotto-nsfw-settings.tns-in-popup .tns-drawer-header {
+    display: none !important;
+}
+
 .ttotto-nsfw-settings .tns-heading {
     display: flex;
     align-items: center;
