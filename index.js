@@ -13,8 +13,11 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.11.1';
+const EXTENSION_VERSION = '0.11.3';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
+const DEVELOPER_UNLOCK_TAPS = 7;
+const DEVELOPER_TAP_RESET_MS = 5000;
+const DEVELOPER_PASSWORD = '130918';
 // setExtensionPrompt 안정 상수: IN_CHAT = 1, SYSTEM = 0 (또또와 동일한 이유로 직접 import 회피)
 const PROMPT_POSITION_IN_CHAT = 1;
 const PROMPT_ROLE_SYSTEM = 0;
@@ -91,6 +94,7 @@ const STEALTH_LEXICON = [
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     adultConfirmed: false,
+    developerMode: false,
     // 'stealth' = 로컬 감지, SFW에선 주입 제로(기본) / 'auto' = 온도 태그 감시 / 'manual' = 채팅 토글로 직접
     armMode: 'stealth',
     stealthSensitivity: 'normal', // 'high' | 'normal' | 'low'
@@ -120,6 +124,8 @@ let refineAbortController = null;
 let refineTimer = null;
 let popupOpen = false;
 let settingsHomeParent = null;
+let developerTapCount = 0;
+let developerTapTimer = null;
 const registeredEventHandlers = [];
 
 // ───────────────────────── 컨텍스트/설정 ─────────────────────────
@@ -150,6 +156,54 @@ function getSettings() {
 
 function saveSettings() {
     getContext().saveSettingsDebounced();
+}
+
+function setDeveloperMode(enabled) {
+    const settings = getSettings();
+    settings.developerMode = Boolean(enabled);
+    saveSettings();
+
+    if (!settings.developerMode) {
+        const meta = getChatMeta(false);
+        if (meta) {
+            meta.slowBurnTargetActive = false;
+            meta.slowBurnTargetCompleted = false;
+            meta.slowBurnRecoveryPending = false;
+            saveChatMeta();
+        }
+    }
+
+    updateUi();
+    toastr.success(
+        settings.developerMode ? '개발자 모드를 활성화했어요.' : '개발자 모드를 해제했어요.',
+        '🔞또또NSFW',
+    );
+}
+
+function handleDeveloperTitleTap(event) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+
+    developerTapCount += 1;
+    clearTimeout(developerTapTimer);
+    developerTapTimer = setTimeout(() => {
+        developerTapCount = 0;
+        developerTapTimer = null;
+    }, DEVELOPER_TAP_RESET_MS);
+
+    if (developerTapCount < DEVELOPER_UNLOCK_TAPS) return;
+
+    developerTapCount = 0;
+    clearTimeout(developerTapTimer);
+    developerTapTimer = null;
+
+    const entered = window.prompt('개발자 모드 비밀번호를 입력하세요.');
+    if (entered === null) return;
+    if (entered.trim() !== DEVELOPER_PASSWORD) {
+        toastr.error('비밀번호가 올바르지 않아요.', '🔞또또NSFW');
+        return;
+    }
+    setDeveloperMode(!getSettings().developerMode);
 }
 
 function getChatMeta(create = true) {
@@ -648,12 +702,13 @@ function slowBurnSessionStartCount() {
 
 function slowBurnTargetProgress() {
     const meta = getChatMeta(false);
+    const developerMode = Boolean(getSettings().developerMode);
     const target = sanitizeSlowBurnTarget(meta?.slowBurnTarget);
     const requiredTurns = clampSlowBurnTargetTurns(meta?.slowBurnTargetTurns);
     const completedTurns = meta?.slowBurnSessionActive
         ? Math.max(0, assistantMessages().length - slowBurnSessionStartCount())
         : 0;
-    const active = Boolean(meta?.slowBurnTargetActive && target && meta?.slowBurnSessionActive);
+    const active = Boolean(developerMode && meta?.slowBurnTargetActive && target && meta?.slowBurnSessionActive);
     return {
         target,
         requiredTurns,
@@ -1249,8 +1304,11 @@ function renderSlowBurnPanel(settings) {
 
     const progress = slowBurnProgress(settings);
     const targetProgress = progress.target;
+    const developerMode = Boolean(settings.developerMode);
     const targetInput = element('tns-slow-burn-target');
     const targetTurnsInput = element('tns-slow-burn-target-turns');
+    element('tns-slow-burn-target-box').hidden = !developerMode;
+    element('tns-slow-burn-target-note').hidden = !developerMode;
     if (document.activeElement !== targetInput) targetInput.value = targetProgress.target;
     if (document.activeElement !== targetTurnsInput) targetTurnsInput.value = String(targetProgress.requiredTurns);
     targetInput.disabled = targetProgress.active;
@@ -1550,6 +1608,7 @@ function bindSetting(id, key, parser = (value) => value, after = null) {
 function bindUi() {
     // 탭 클릭은 루트 위임으로 — 패널이 팝업으로 이동해도, 어떤 환경에서도 확실히 잡힌다
     const root = document.getElementById('ttotto-nsfw-settings');
+    element('tns-developer-title').addEventListener('click', handleDeveloperTitleTap);
     root.addEventListener('click', (event) => {
         const button = event.target?.closest?.('[data-tns-tab]');
         if (button && root.contains(button)) {
@@ -1638,6 +1697,7 @@ function bindUi() {
     element('tns-force-arm').addEventListener('click', forceToggleArm);
 
     const saveSlowBurnTargetDraft = () => {
+        if (!getSettings().developerMode) return;
         const meta = getChatMeta();
         meta.slowBurnTarget = sanitizeSlowBurnTarget(element('tns-slow-burn-target').value);
         meta.slowBurnTargetTurns = clampSlowBurnTargetTurns(element('tns-slow-burn-target-turns').value);
@@ -1655,6 +1715,7 @@ function bindUi() {
     });
     element('tns-slow-burn-target-start').addEventListener('click', () => {
         const settings = getSettings();
+        if (!settings.developerMode) return;
         const target = sanitizeSlowBurnTarget(element('tns-slow-burn-target').value);
         const turns = clampSlowBurnTargetTurns(element('tns-slow-burn-target-turns').value);
         if (!target) {
@@ -1688,6 +1749,7 @@ function bindUi() {
         updateUi();
     });
     element('tns-slow-burn-target-stop').addEventListener('click', () => {
+        if (!getSettings().developerMode) return;
         const meta = getChatMeta();
         meta.slowBurnTargetActive = false;
         meta.slowBurnTargetCompleted = false;
@@ -1793,7 +1855,7 @@ function buildPopupShell() {
     overlay.innerHTML = [
         '<div class="tns-popup">',
         '  <div class="tns-popup-header">',
-        '    <strong>🔞 또또NSFW</strong>',
+        '    <strong id="tns-popup-developer-title">🔞 또또NSFW</strong>',
         '    <button id="tns-popup-close" class="menu_button" type="button" title="닫기">✕</button>',
         '  </div>',
         '  <div id="tns-popup-body" class="tns-popup-body"></div>',
@@ -1805,6 +1867,7 @@ function buildPopupShell() {
         if (event.target === overlay) closePopup();
     });
     overlay.querySelector('#tns-popup-close').addEventListener('click', closePopup);
+    overlay.querySelector('#tns-popup-developer-title').addEventListener('click', handleDeveloperTitleTap);
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape' && popupOpen) closePopup();
     });

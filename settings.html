@@ -4,7 +4,7 @@
       <div class="tns-heading">
         <span aria-hidden="true">🔞</span>
         <div>
-          <b>또또NSFW</b>
+          <b id="tns-developer-title">또또NSFW</b>
           <small id="tns-header-status">장면을 지켜보는 중이에요</small>
         </div>
       </div>
@@ -13,7 +13,6 @@
           <input id="tns-enabled" type="checkbox">
           <span>사용</span>
         </label>
-        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
     </div>
 
@@ -38,7 +37,7 @@
         </div>
 
         <div id="tns-slow-burn-card" class="tns-slow-burn-card" hidden>
-          <div class="tns-slow-burn-target-box">
+          <div id="tns-slow-burn-target-box" class="tns-slow-burn-target-box" hidden>
             <label class="tns-field" for="tns-slow-burn-target">
               <span><strong>내가 보고 싶은 장면</strong></span>
               <input id="tns-slow-burn-target" type="text" class="text_pole" maxlength="200" placeholder="예: 키스">
@@ -67,7 +66,7 @@
             <button id="tns-slow-burn-next" class="menu_button" type="button" title="다음 단계">다음 ▶</button>
             <button id="tns-slow-burn-auto" class="menu_button" type="button">자동 감지</button>
           </div>
-          <small>목표 장면 진행 중에는 그 장면 자체를 유지하되, 매 답변의 대사·반응·세부 행동은 새롭게 전개해요.</small>
+          <small id="tns-slow-burn-target-note" hidden>목표 장면 진행 중에는 그 장면 자체를 유지하되, 매 답변의 대사·반응·세부 행동은 새롭게 전개해요.</small>
         </div>
 
         <label class="tns-field" for="tns-state-location">

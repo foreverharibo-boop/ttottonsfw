@@ -2,6 +2,13 @@
     margin: 0;
 }
 
+#tns-developer-title,
+#tns-popup-developer-title {
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+}
+
 /* 테마/확장 CSS의 display 선언이 HTML hidden 상태를 다시 드러내지 못하게 한다. */
 .ttotto-nsfw-settings [hidden] {
     display: none !important;
@@ -441,10 +448,6 @@
 /* 팝업 안에서는 드로어를 항상 펼침 */
 .tns-in-popup .inline-drawer-content {
     display: block !important;
-}
-
-.tns-in-popup .inline-drawer-icon {
-    display: none;
 }
 
 .ttotto-nsfw-settings .tns-button-row {
