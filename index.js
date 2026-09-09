@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.12.0';
+const EXTENSION_VERSION = '0.12.1';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -49,6 +49,7 @@ const SLOW_BURN_MIN_TURNS = Object.freeze({
 });
 const SLOW_BURN_TARGET_MAX_TURNS = 20;
 const SLOW_BURN_TARGET_MAX_LENGTH = 200;
+const DIALOGUE_BEAT_WINDOW = 2;
 
 // 장면 스타일 다이얼 — 무장 중에만 적용
 const STYLE_LENGTH_INSTRUCTIONS = Object.freeze({
@@ -106,6 +107,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     adultConfirmed: false,
     developerMode: false,
+    dialogueBeatGuard: false, // 개발자 실험실: 최근 대사 의도·기능 반복 방지
     // 'stealth' = 로컬 감지, SFW에선 주입 제로(기본) / 'auto' = 온도 태그 감시 / 'manual' = 채팅 토글로 직접
     armMode: 'stealth',
     stealthSensitivity: 'normal', // 'high' | 'normal' | 'low'
@@ -181,9 +183,9 @@ function saveSettings() {
 function setDeveloperMode(enabled) {
     const settings = getSettings();
     settings.developerMode = Boolean(enabled);
-    saveSettings();
 
     if (!settings.developerMode) {
+        settings.dialogueBeatGuard = false;
         const meta = getChatMeta(false);
         if (meta) {
             meta.slowBurnTargetActive = false;
@@ -192,6 +194,7 @@ function setDeveloperMode(enabled) {
             saveChatMeta();
         }
     }
+    saveSettings();
 
     updateUi();
     toastr.success(
@@ -245,10 +248,12 @@ function getChatMeta(create = true) {
             slowBurnTargetTurns: 3,
             slowBurnTargetActive: false,
             slowBurnTargetCompleted: false,
+            ignoredDialogueBeats: [],
         };
     }
     const meta = context.chatMetadata[CHAT_STATE_KEY];
     if (!Array.isArray(meta.ignoredActs)) meta.ignoredActs = [];
+    if (!Array.isArray(meta.ignoredDialogueBeats)) meta.ignoredDialogueBeats = [];
     if (!Array.isArray(meta.customBans)) meta.customBans = [];
     if (typeof meta.slowBurnTarget !== 'string') meta.slowBurnTarget = '';
     meta.slowBurnTarget = sanitizeSlowBurnTarget(meta.slowBurnTarget);
@@ -434,7 +439,15 @@ function hasBi(bi) {
 
 function sanitizeState(raw) {
     if (!raw || typeof raw !== 'object') return null;
-    const clean = { location: { en: '', ko: '' }, characters: {}, acts: [], stage: null };
+    const clean = {
+        location: { en: '', ko: '' },
+        characters: {},
+        acts: [],
+        dialogueBeats: [],
+        dialogueReported: Object.prototype.hasOwnProperty.call(raw, 'dialogue_beats')
+            || Object.prototype.hasOwnProperty.call(raw, 'dialogueBeats'),
+        stage: null,
+    };
     clean.location = toBi(raw.location);
     const characters = raw.characters && typeof raw.characters === 'object' ? raw.characters : {};
     for (const [name, info] of Object.entries(characters).slice(0, 64)) {
@@ -447,6 +460,10 @@ function sanitizeState(raw) {
     }
     const acts = Array.isArray(raw.acts) ? raw.acts : [];
     clean.acts = acts.map(toBi).filter(hasBi).slice(0, 64);
+    const dialogueBeats = Array.isArray(raw.dialogue_beats)
+        ? raw.dialogue_beats
+        : Array.isArray(raw.dialogueBeats) ? raw.dialogueBeats : [];
+    clean.dialogueBeats = dialogueBeats.map(toBi).filter(hasBi).slice(0, 4);
     const heat = Number(raw.heat);
     clean.heat = Number.isFinite(heat) ? Math.max(0, Math.min(10, Math.round(heat))) : null;
     const stage = raw.stage === null || raw.stage === undefined ? NaN : Number(raw.stage);
@@ -454,7 +471,7 @@ function sanitizeState(raw) {
     const next = Array.isArray(raw.next) ? raw.next : [];
     clean.next = next.map(toBi).filter(hasBi).slice(0, 8);
     const hasCharacters = Object.values(clean.characters).some((info) => hasBi(info.clothing) || hasBi(info.position) || hasBi(info.contact));
-    if (!hasBi(clean.location) && !hasCharacters && !clean.acts.length && clean.heat === null && clean.stage === null && !clean.next.length) return null;
+    if (!hasBi(clean.location) && !hasCharacters && !clean.acts.length && !clean.dialogueBeats.length && clean.heat === null && clean.stage === null && !clean.next.length) return null;
     return clean;
 }
 
@@ -470,6 +487,7 @@ function stateCompletenessIssues(state, settings = getSettings()) {
     if (state.heat === null || state.heat === undefined) issues.push('heat');
     if (settings.slowBurnEnabled && (state.stage === null || state.stage === undefined)) issues.push('stage');
     if (settings.nextBeatHints && !state.next?.length) issues.push('next');
+    if (settings.developerMode && settings.dialogueBeatGuard && !state.dialogueReported) issues.push('dialogue_beats');
     return issues;
 }
 
@@ -594,6 +612,15 @@ function isActIgnored(act, ignored) {
     return ignored.has(biText(act, 'en').toLocaleLowerCase()) || ignored.has(biText(act, 'ko').toLocaleLowerCase());
 }
 
+function ignoredDialogueBeatSet() {
+    const meta = getChatMeta(false);
+    return new Set((meta?.ignoredDialogueBeats ?? []).map((beat) => String(beat).toLocaleLowerCase()));
+}
+
+function isDialogueBeatIgnored(beat, ignored) {
+    return ignored.has(biText(beat, 'en').toLocaleLowerCase()) || ignored.has(biText(beat, 'ko').toLocaleLowerCase());
+}
+
 const ACT_STOP_WORDS = new Set([
     'a', 'an', 'the', 'to', 'of', 'and', 'with', 'her', 'his', 'their', 'she', 'he', 'they',
     '그', '그녀', '그의', '그녀의', '서로', '에게', '으로', '에서', '하다', '한다', '하며',
@@ -676,6 +703,28 @@ function recentActs(windowSize) {
         if (!first.acts.length) rows.shift();
     }
     return rows.filter((row) => row.acts.length);
+}
+
+// 실험실: 최근 2개의 AI 답변에서 사용한 대사의 목적·기능. 같은 의도는 최신 항목만 남긴다.
+function recentDialogueBeats(windowSize = DIALOGUE_BEAT_WINDOW) {
+    const ignored = ignoredDialogueBeatSet();
+    const messages = assistantMessages().slice(-Math.max(1, windowSize));
+    const rows = [];
+    for (const message of messages) {
+        const snapshot = snapshotForMessage(message);
+        if (!snapshot?.state?.dialogueBeats?.length) continue;
+        const beats = snapshot.state.dialogueBeats.filter((beat) => !isDialogueBeatIgnored(beat, ignored));
+        if (beats.length) rows.push({ beats });
+    }
+    const seen = [];
+    for (let i = rows.length - 1; i >= 0; i--) {
+        rows[i].beats = rows[i].beats.filter((beat) => {
+            if (seen.some((item) => actsAreSimilar(beat, item))) return false;
+            seen.push(beat);
+            return true;
+        });
+    }
+    return rows.filter((row) => row.beats.length);
 }
 
 // ───────────────────────── 주입문 생성 ─────────────────────────
@@ -951,6 +1000,19 @@ const SLOW_BURN_STATE_REPORT_LINES = [
     '"stage" is the slow-burn progression stage as an integer from 1 to 6. Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
 ];
 
+function stateReportLines(slowBurnEnabled, dialogueGuard) {
+    const lines = [...(slowBurnEnabled ? SLOW_BURN_STATE_REPORT_LINES : STATE_REPORT_LINES)];
+    if (!dialogueGuard) return lines;
+    lines[1] = lines[1].replace(
+        ',"acts":',
+        ',"dialogue_beats":["0-3 dialogue intents from spoken lines, each \'English || 한국어\'"],"acts":',
+    );
+    lines.splice(4, 0,
+        '"dialogue_beats" rules: list 0-3 conversational purposes used by the CHARACTER in this response, not quotations or surface wording. Examples: asks whether the partner likes it, begs for more, repeats an ownership claim, praises the same quality, provokes a reaction, or asks permission. Use [] when there is no spoken dialogue.',
+    );
+    return lines;
+}
+
 // 감시 모드 전용 초경량 주입 — 장면 온도 한 줄만 요청 (SFW 장면에는 개입하지 않음)
 const MONITOR_REPORT_LINES = [
     '[Scene Monitor] End your response with exactly one line in this format. It is machine-read and hidden from the reader — include it every time, and change nothing else about how you write:',
@@ -963,6 +1025,7 @@ function buildInjection() {
     const settings = getSettings();
     const { state } = effectiveState();
     const targetActive = slowBurnTargetProgress().active;
+    const dialogueGuard = Boolean(settings.developerMode && settings.dialogueBeatGuard);
 
     // 무장 전: 해제 브릿지가 걸려 있으면 마무리 지시를 한 번 주입.
     // 그 외엔 스텔스 모드는 아무것도 주입하지 않고, 온도 감시 모드는 온도 한 줄만 요청
@@ -1011,6 +1074,20 @@ function buildInjection() {
             : 'Repeating a listed beat with different wording still counts as repetition. Bring something new.');
     }
 
+    if (dialogueGuard) {
+        const dialogueRows = recentDialogueBeats();
+        if (dialogueRows.length) {
+            sections.push(
+                '',
+                `DIALOGUE INTENTS ALREADY USED in the last ${dialogueRows.length} CHARACTER response(s) — do not repeat the same conversational function merely by paraphrasing it:`,
+                ...dialogueRows.map((row) => `- ${row.beats.map((beat) => biText(beat, 'en')).join(', ')}`),
+                'Keep the character voice, but give the spoken dialogue a genuinely new purpose or advance what is being said. Do not repeat the same pleasure-check, plea, praise, taunt, ownership claim, permission request, or reaction request in different words.',
+                'EXCEPTIONS: a direct answer to the USER, a necessary consent or safety clarification, and a deliberately meaningful refrain/catchphrase may be used when context truly requires it.',
+                targetActive ? 'This guard must never be used to avoid, delay, or replace the active USER TARGET SCENE.' : '',
+            );
+        }
+    }
+
     if (settings.nextBeatHints && !targetActive) {
         const beats = nextBeatCandidates();
         if (beats.length) {
@@ -1031,7 +1108,7 @@ function buildInjection() {
     ].filter(Boolean);
     if (styleParts.length) sections.push('', ...styleParts);
 
-    sections.push('', ...(settings.slowBurnEnabled ? SLOW_BURN_STATE_REPORT_LINES : STATE_REPORT_LINES));
+    sections.push('', ...stateReportLines(settings.slowBurnEnabled, dialogueGuard));
 
     // 가장 마지막 지시가 목표 실행 명령이 되도록 다시 고정한다.
     if (targetActive) sections.push('', ...buildTargetFinalEnforcementLines());
@@ -1118,21 +1195,24 @@ function buildRefineInput() {
 }
 
 function refinePromptMessages() {
-    const slowBurnEnabled = getSettings().slowBurnEnabled;
+    const settings = getSettings();
+    const slowBurnEnabled = settings.slowBurnEnabled;
+    const dialogueGuard = Boolean(settings.developerMode && settings.dialogueBeatGuard);
     const stageSchema = slowBurnEnabled ? ',"stage":1' : '';
+    const dialogueSchema = dialogueGuard ? ',"dialogue_beats":["0-3 dialogue intents from the final CHARACTER message, each \'English || 한국어\'"]' : '';
     const stageRule = slowBurnEnabled
         ? '\n- "stage" is the scene\'s slow-burn progression as an integer: 1 tension/atmosphere, 2 gaze/words/proximity, 3 initial light contact, 4 deepening contact/reactions, 5 explicit escalation, 6 peak or conclusion permitted.'
         : '';
     const system = `You are a scene-state tracker for an adult fiction roleplay log. All characters are adults. Read the log excerpt and return ONLY a JSON object, no markdown, no commentary.
 
 Schema:
-{"location":"short English phrase || 짧은 한국어 구","characters":{"name":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant beats from the most recent CHARACTER message only, each 'English || 한국어'"],"heat":0${stageSchema},"next":["2-3 fresh beats the scene could move to next, each 'English || 한국어'"]}
+{"location":"short English phrase || 짧은 한국어 구","characters":{"name":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}}${dialogueSchema},"acts":["2-4 significant beats from the most recent CHARACTER message only, each 'English || 한국어'"],"heat":0${stageSchema},"next":["2-3 fresh beats the scene could move to next, each 'English || 한국어'"]}
 
 Rules:
 - Every string value is a bilingual pair: concise English first, then " || ", then natural Korean.
 - Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.
 - "acts" must cover only the final CHARACTER message. List ONLY substantive beats (physical/romantic/emotional developments); skip mundane logistics like snacks, drinks, blankets, or remote controls.
-${HEAT_SCALE_LINES.join('\n')}${stageRule}
+${dialogueGuard ? '- "dialogue_beats" must list 0-3 conversational intents/functions from spoken CHARACTER dialogue in the final CHARACTER message only. Describe the purpose, not exact wording or quotations. Use [] if there is no spoken dialogue.\n' : ''}${HEAT_SCALE_LINES.join('\n')}${stageRule}
 - "next" must not repeat anything already listed in "acts".
 - Include every present character. Use the exact names from the log.
 - If something is unknown, use an empty string. Return the JSON object only.`;
@@ -1572,6 +1652,37 @@ function renderStatePanel() {
     element('tns-acts-empty').hidden = rows.length > 0;
     element('tns-acts-summary').textContent = `최근 ${settings.repeatWindow}턴 기준`;
 
+    // 개발자 실험실: 최근 대사 의도 목록
+    const dialogueSection = element('tns-dialogue-section');
+    const dialogueEnabled = Boolean(settings.developerMode && settings.dialogueBeatGuard);
+    dialogueSection.hidden = !dialogueEnabled;
+    const dialogueList = element('tns-dialogue-list');
+    dialogueList.replaceChildren();
+    const dialogueRows = dialogueEnabled ? recentDialogueBeats() : [];
+    for (const row of dialogueRows) {
+        for (const beat of row.beats) {
+            const chip = document.createElement('span');
+            chip.className = 'tns-act-chip';
+            const text = document.createElement('span');
+            text.textContent = biText(beat);
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.title = '이 대사 의도는 반복 금지에서 제외';
+            remove.textContent = '×';
+            remove.addEventListener('click', () => {
+                const meta = getChatMeta();
+                for (const key of [biText(beat, 'en'), biText(beat, 'ko')]) {
+                    if (key && !meta.ignoredDialogueBeats.includes(key)) meta.ignoredDialogueBeats.push(key);
+                }
+                saveChatMeta();
+                updateUi();
+            });
+            chip.append(text, remove);
+            dialogueList.append(chip);
+        }
+    }
+    element('tns-dialogue-empty').hidden = dialogueRows.length > 0;
+
     // 다음 전개 후보
     const nextList = element('tns-next-list');
     nextList.replaceChildren();
@@ -1708,6 +1819,8 @@ function updateUi() {
         const keywordsInput = element('tns-stealth-keywords');
         if (document.activeElement !== keywordsInput) keywordsInput.value = String(settings.stealthKeywords ?? '');
         element('tns-next-hints').checked = Boolean(settings.nextBeatHints);
+        element('tns-dialogue-guard-setting').hidden = !settings.developerMode;
+        element('tns-dialogue-guard').checked = Boolean(settings.dialogueBeatGuard);
         element('tns-auto-refine').checked = Boolean(settings.autoRefine);
 
         element('tns-adult-warning').hidden = Boolean(settings.adultConfirmed);
@@ -1793,6 +1906,7 @@ function bindUi() {
     bindSetting('tns-stealth-sensitivity', 'stealthSensitivity', String);
     bindSetting('tns-stealth-keywords', 'stealthKeywords', String);
     bindSetting('tns-next-hints', 'nextBeatHints', Boolean);
+    bindSetting('tns-dialogue-guard', 'dialogueBeatGuard', Boolean);
     bindSetting('tns-pace-mode', 'paceMode', String);
     bindSetting('tns-slow-burn-enabled', 'slowBurnEnabled', Boolean, (settings) => {
         const meta = getChatMeta(false);
@@ -1986,6 +2100,7 @@ function bindUi() {
         const meta = getChatMeta();
         meta.manualState = null;
         meta.ignoredActs = [];
+        meta.ignoredDialogueBeats = [];
         meta.slowBurnStageOverride = null;
         meta.slowBurnLocked = false;
         for (const message of assistantMessages()) {

@@ -108,6 +108,20 @@
         </div>
         <div id="tns-custom-ban-list" class="tns-acts-list"></div>
 
+        <div id="tns-dialogue-section" class="tns-dialogue-section" hidden>
+          <div class="tns-section-head tns-acts-head">
+            <div>
+              <strong>🧪 최근 대사 전개</strong>
+              <small>최근 2개의 AI 답변에서 이미 사용한 대사의 목적이에요.</small>
+            </div>
+          </div>
+          <div id="tns-dialogue-list" class="tns-acts-list"></div>
+          <div id="tns-dialogue-empty" class="tns-empty" hidden>
+            <span aria-hidden="true">💬</span>
+            <span>기록된 대사 전개가 아직 없어요</span>
+          </div>
+        </div>
+
         <div id="tns-next-section">
           <div class="tns-section-head tns-acts-head">
             <div>
@@ -193,6 +207,14 @@
             <small>AI가 상태 태그에 기록한 새 전개 후보 중 최근 행동·금지 항목과 겹치지 않는 것만 다음 생성에 힌트로 넣어요.</small>
           </span>
           <input id="tns-next-hints" type="checkbox">
+        </label>
+
+        <label id="tns-dialogue-guard-setting" class="tns-setting-row" for="tns-dialogue-guard" hidden>
+          <span>
+            <strong>🧪 대사 전개 반복 방지</strong>
+            <small>최근 2개의 AI 답변에서 같은 질문·부탁·칭찬·도발 같은 대사의 목적이 말만 바뀌어 반복되는 것을 막아요. 문장 표현을 관리하는 기본 또또와는 별개예요.</small>
+          </span>
+          <input id="tns-dialogue-guard" type="checkbox">
         </label>
 
         <div class="tns-field">
