@@ -95,9 +95,9 @@
 }
 
 .ttotto-nsfw-settings .tns-tab.is-active {
-    border: 1px solid color-mix(in srgb, currentColor 24%, transparent) !important;
-    background: color-mix(in srgb, currentColor 7%, transparent) !important;
-    box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 4%, transparent) inset !important;
+    border: 1px solid color-mix(in srgb, currentColor 20%, transparent) !important;
+    background: transparent !important;
+    box-shadow: none !important;
     filter: none;
     font-weight: 700;
 }
@@ -300,8 +300,8 @@
     gap: 6px;
     padding: 8px;
     border-radius: 7px;
-    background: color-mix(in srgb, darkorange 10%, transparent);
-    border: 1px solid color-mix(in srgb, darkorange 26%, transparent);
+    background: color-mix(in srgb, mediumpurple 10%, transparent);
+    border: 1px solid color-mix(in srgb, mediumpurple 30%, transparent);
 }
 
 .ttotto-nsfw-settings .tns-slow-burn-target-box > small {
@@ -329,8 +329,8 @@
 }
 
 .ttotto-nsfw-settings .tns-slow-burn-target-box.is-active {
-    border-color: color-mix(in srgb, orangered 70%, transparent);
-    box-shadow: 0 0 0 1px color-mix(in srgb, orangered 18%, transparent) inset;
+    border-color: color-mix(in srgb, mediumpurple 62%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, mediumpurple 16%, transparent) inset;
 }
 
 .ttotto-nsfw-settings .tns-slow-burn-head {
