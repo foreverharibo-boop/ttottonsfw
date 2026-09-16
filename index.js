@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.12.6';
+const EXTENSION_VERSION = '0.12.7';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -24,6 +24,9 @@ const PROMPT_ROLE_SYSTEM = 0;
 
 const STATE_TAG_REGEX = /<scene_state\b[^>]*>([\s\S]*?)<\/scene_state>/gi;
 const STATE_TAG_LOOSE_REGEX = /```(?:json)?\s*<scene_state\b[^>]*>[\s\S]*?<\/scene_state>\s*```/gi;
+// 모델이 상태 태그를 닫은 직후 덧붙인 단독 확인 문구만 제거한다.
+// 태그 앞의 본문이나 태그 뒤에 다른 서술이 하나라도 있으면 일치하지 않는다.
+const STATE_TRAILING_ACK_REGEX = /(<\/scene_state>[ \t]*(?:\r?\n[ \t]*```)?)[ \t\r\n]+(?:no\s+changes?|unchanged)[ \t]*[.!]?[ \t]*$/i;
 
 const PACE_INSTRUCTIONS = Object.freeze({
     hold: 'Maintain the current stage of the scene. Deepen sensation and reaction without jumping ahead.',
@@ -510,7 +513,8 @@ function parseStateFromText(text) {
 
 function stripStateTag(text) {
     const source = String(text ?? '');
-    const cleaned = source
+    const withoutTrailingAck = source.replace(STATE_TRAILING_ACK_REGEX, '$1');
+    const cleaned = withoutTrailingAck
         .replace(STATE_TAG_LOOSE_REGEX, '')
         .replace(STATE_TAG_REGEX, '')
         // 스트리밍 중 잘렸거나 모델이 닫는 태그를 누락한 경우에도 기계용 내용이 본문에 노출되지 않게 제거한다.
