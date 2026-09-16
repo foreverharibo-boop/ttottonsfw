@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.12.3';
+const EXTENSION_VERSION = '0.12.5';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -24,6 +24,7 @@ const PROMPT_ROLE_SYSTEM = 0;
 
 const STATE_TAG_REGEX = /<scene_state\b[^>]*>([\s\S]*?)<\/scene_state>/gi;
 const STATE_TAG_LOOSE_REGEX = /```(?:json)?\s*<scene_state\b[^>]*>[\s\S]*?<\/scene_state>\s*```/gi;
+const STATE_META_ACK_SUFFIX_REGEX = /(?:^|\n)[ \t]*(?:no\s+changes?|unchanged)[ \t]*[.!]?[ \t]*$/i;
 
 const PACE_INSTRUCTIONS = Object.freeze({
     hold: 'Maintain the current stage of the scene. Deepen sensation and reaction without jumping ahead.',
@@ -509,14 +510,20 @@ function parseStateFromText(text) {
 }
 
 function stripStateTag(text) {
-    return String(text ?? '')
+    const source = String(text ?? '');
+    const hadStateMarkup = /<\/?scene_state\b/i.test(source);
+    let cleaned = source
         .replace(STATE_TAG_LOOSE_REGEX, '')
         .replace(STATE_TAG_REGEX, '')
         // 스트리밍 중 잘렸거나 모델이 닫는 태그를 누락한 경우에도 기계용 내용이 본문에 노출되지 않게 제거한다.
         .replace(/```(?:json)?\s*<scene_state\b[^>]*>[\s\S]*$/gi, '')
         .replace(/<scene_state\b[^>]*>[\s\S]*$/gi, '')
         .replace(/<\/scene_state>\s*```/gi, '')
-        .replace(/<\/scene_state>/gi, '')
+        .replace(/<\/scene_state>/gi, '');
+    // 상태 태그와 함께 모델이 덧붙인 작업 확인 문구만 제거한다.
+    // 상태 태그가 없던 일반 본문·대사의 "no change"는 건드리지 않는다.
+    if (hadStateMarkup) cleaned = cleaned.replace(STATE_META_ACK_SUFFIX_REGEX, '');
+    return cleaned
         .replace(/\n{3,}$/g, '\n')
         .replace(/[ \t]+$/g, '')
         .trimEnd();
@@ -984,20 +991,24 @@ function buildSlowBurnLines(settings) {
 
 const STATE_REPORT_LINES = [
     'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
-    '<scene_state>{"location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
+    '<scene_state>{"_status":"updated","location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
     'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
     '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
     ...HEAT_SCALE_LINES,
     'Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
+    'The optional top-level "_status" field is the ONLY place for a change acknowledgement: use "no_change" there if you need to signal that tracked state did not change; otherwise use "updated". All real state fields must still repeat their complete current values.',
+    'Never use placeholders such as "no change", "no changes", "unchanged", or "same" in location, character state, acts, heat, or next. Never output any acknowledgement, status note, or meta-comment outside the <scene_state> block.',
 ];
 
 const SLOW_BURN_STATE_REPORT_LINES = [
     'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
-    '<scene_state>{"location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"stage":1,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
+    '<scene_state>{"_status":"updated","location":"short English phrase || 짧은 한국어 구","characters":{"이름":{"clothing":"current clothing state, English || 한국어","position":"current posture/position, English || 한국어","contact":"current physical contact, English || 한국어"}},"acts":["2-4 significant new beats in this response, each \'English || 한국어\'"],"heat":0,"stage":1,"next":["2-3 fresh beats the scene could move to next, each \'English || 한국어\'"]}</scene_state>',
     'Every string value must be a bilingual pair: concise English first, then " || ", then natural Korean. Use the same character names as in the chat.',
     '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
     ...HEAT_SCALE_LINES,
     '"stage" is the slow-burn progression stage as an integer from 1 to 6. Update every field to reflect the situation at the END of your response. "next" must not repeat anything from "acts".',
+    'The optional top-level "_status" field is the ONLY place for a change acknowledgement: use "no_change" there if you need to signal that tracked state did not change; otherwise use "updated". All real state fields must still repeat their complete current values.',
+    'Never use placeholders such as "no change", "no changes", "unchanged", or "same" in location, character state, acts, heat, stage, or next. Never output any acknowledgement, status note, or meta-comment outside the <scene_state> block.',
 ];
 
 function stateReportLines(slowBurnEnabled, dialogueGuard) {
@@ -1015,10 +1026,10 @@ function stateReportLines(slowBurnEnabled, dialogueGuard) {
 
 // 감시 모드 전용 초경량 주입 — 장면 온도 한 줄만 요청 (SFW 장면에는 개입하지 않음)
 const MONITOR_REPORT_LINES = [
-    '[Scene Monitor] End your response with exactly one line in this format. It is machine-read and hidden from the reader — include it every time, and change nothing else about how you write:',
-    '<scene_state>{"heat":0}</scene_state>',
+    '[Scene Monitor] Write the response normally, then append exactly one machine-readable state line in this format. It is hidden from the reader:',
+    '<scene_state>{"_status":"updated","heat":0}</scene_state>',
     ...HEAT_SCALE_LINES,
-    'Report "heat" factually. Do not mention this line in your prose.',
+    'Report "heat" factually. If you need to signal no change, use only the optional top-level "_status":"no_change" inside <scene_state>; otherwise use "updated". Never put a change acknowledgement or any other machine-status text outside the tag.',
 ];
 
 function buildInjection() {
