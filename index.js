@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.12.7';
+const EXTENSION_VERSION = '0.13.0';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -110,7 +110,11 @@ const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     adultConfirmed: false,
     developerMode: false,
-    dialogueBeatGuard: false, // 개발자 실험실: 최근 대사 의도·기능 반복 방지
+    dialogueBeatGuard: true, // 최근 대사 의도·기능 반복 방지 (0.13.0부터 일반 기능, 신규 설치 기본 켬)
+    dialogueWindow: 2, // 대사 의도를 "또 하지 마" 목록에 올릴 최근 AI 답변 수 (1~6)
+    // CardInject 연동: 캐시트 카테고리를 다음 전개 힌트의 참고 자료로 사용 (무장 중에만 주입)
+    cardLinkEnabled: false,
+    cardLinkSelected: {}, // { [캐릭터 키]: [카테고리 key, ...] }
     // 'stealth' = 로컬 감지, SFW에선 주입 제로(기본) / 'auto' = 온도 태그 감시 / 'manual' = 채팅 토글로 직접
     armMode: 'stealth',
     stealthSensitivity: 'normal', // 'high' | 'normal' | 'low'
@@ -173,6 +177,13 @@ function getSettings() {
         ? Math.min(4000, Math.max(1000, Math.round(refineTokens)))
         : DEFAULT_SETTINGS.refineMaxTokens;
     if (!Object.prototype.hasOwnProperty.call(SLOW_BURN_MIN_TURNS, settings.slowBurnIntensity)) settings.slowBurnIntensity = 'slow';
+    const dialogueWindow = Number(settings.dialogueWindow);
+    settings.dialogueWindow = Number.isFinite(dialogueWindow)
+        ? Math.min(6, Math.max(1, Math.round(dialogueWindow)))
+        : DIALOGUE_BEAT_WINDOW;
+    if (!settings.cardLinkSelected || typeof settings.cardLinkSelected !== 'object' || Array.isArray(settings.cardLinkSelected)) {
+        settings.cardLinkSelected = {};
+    }
     if (previousSchemaVersion < 2 || settings.refineMaxTokens !== refineTokens) {
         context.saveSettingsDebounced?.();
     }
@@ -188,7 +199,6 @@ function setDeveloperMode(enabled) {
     settings.developerMode = Boolean(enabled);
 
     if (!settings.developerMode) {
-        settings.dialogueBeatGuard = false;
         const meta = getChatMeta(false);
         if (meta) {
             meta.slowBurnTargetActive = false;
@@ -490,7 +500,6 @@ function stateCompletenessIssues(state, settings = getSettings()) {
     if (state.heat === null || state.heat === undefined) issues.push('heat');
     if (settings.slowBurnEnabled && (state.stage === null || state.stage === undefined)) issues.push('stage');
     if (settings.nextBeatHints && !state.next?.length) issues.push('next');
-    if (settings.developerMode && settings.dialogueBeatGuard && !state.dialogueReported) issues.push('dialogue_beats');
     return issues;
 }
 
@@ -712,7 +721,7 @@ function recentActs(windowSize) {
 }
 
 // 실험실: 최근 2개의 AI 답변에서 사용한 대사의 목적·기능. 같은 의도는 최신 항목만 남긴다.
-function recentDialogueBeats(windowSize = DIALOGUE_BEAT_WINDOW) {
+function recentDialogueBeats(windowSize = Number(getSettings().dialogueWindow) || DIALOGUE_BEAT_WINDOW) {
     const ignored = ignoredDialogueBeatSet();
     const messages = assistantMessages().slice(-Math.max(1, windowSize));
     const rows = [];
@@ -731,6 +740,111 @@ function recentDialogueBeats(windowSize = DIALOGUE_BEAT_WINDOW) {
         });
     }
     return rows.filter((row) => row.beats.length);
+}
+
+// ───────────────────────── CardInject 연동 ─────────────────────────
+// CardInject가 캐릭터별로 저장한 카테고리(extensionSettings.cardinject.perChar[캐릭터키].categories)를
+// 읽기 전용으로 참조한다. CardInject 쪽 코드는 건드리지 않는다.
+// 용도: 다음 전개 힌트를 만들 때 캐릭터 시트의 성향·취향 카테고리를 참고 자료로 쓴다.
+// 같은 카테고리를 CardInject에서 꺼두면(enabled 해제) 이 확장이 "무장 중에만" 주입하게 된다.
+const CARD_LINK_STORE_KEY = 'cardinject';
+const CARD_LINK_CHAR_LIMIT = 2500; // 참고 자료 총량 상한 (주입문 비대화 방지)
+const CARD_LINK_HINT_RE = /kink|fetish|preference|sexual|nsfw|성향|취향|선호|성적|섹|플레이/i;
+
+// 지금 채팅의 캐릭터들 (그룹 채팅이면 멤버 전체). CardInject와 같은 키 규칙: avatar 우선, 없으면 name.
+function activeCharacterEntries() {
+    const context = getContext();
+    const characters = Array.isArray(context.characters) ? context.characters : [];
+    const entries = [];
+    const push = (char) => {
+        if (!char) return;
+        const key = char.avatar || char.name;
+        if (!key || entries.some((entry) => entry.key === key)) return;
+        entries.push({ key: String(key), name: String(char.name || key) });
+    };
+    const groupId = context.groupId;
+    if (groupId !== null && groupId !== undefined && groupId !== '') {
+        const group = (Array.isArray(context.groups) ? context.groups : []).find((item) => String(item?.id) === String(groupId));
+        for (const member of group?.members ?? []) push(characters.find((char) => char?.avatar === member));
+    } else {
+        const id = Number(context.characterId);
+        if (Number.isInteger(id)) push(characters[id]);
+    }
+    return entries;
+}
+
+// CardInject에 저장된 카테고리 목록 (내용이 있는 것만)
+function cardLinkOptions() {
+    const store = getContext().extensionSettings?.[CARD_LINK_STORE_KEY];
+    if (!store || typeof store !== 'object' || !store.perChar || typeof store.perChar !== 'object') {
+        return { available: false, rows: [] };
+    }
+    const rows = [];
+    for (const entry of activeCharacterEntries()) {
+        const categories = store.perChar[entry.key]?.categories;
+        if (!Array.isArray(categories)) continue;
+        for (const category of categories) {
+            const content = String(category?.content ?? '').trim();
+            if (!category?.key || !content) continue;
+            const name = String(category.name || category.key);
+            rows.push({
+                charKey: entry.key,
+                charName: entry.name,
+                catKey: String(category.key),
+                name,
+                content,
+                ciEnabled: Boolean(category.enabled),
+                likely: CARD_LINK_HINT_RE.test(name),
+            });
+        }
+    }
+    return { available: true, rows };
+}
+
+// CardInject 내용에는 {{char}}/{{user}} 매크로가 그대로 들어 있으므로 주입 전에 풀어준다.
+function resolveCardMacros(text, charName) {
+    const context = getContext();
+    const userName = String(context.name1 ?? 'User');
+    let out = String(text ?? '');
+    try {
+        if (typeof context.substituteParams === 'function') out = context.substituteParams(out, userName, charName);
+    } catch (error) {
+        console.debug(`${LOG_PREFIX} 매크로 치환 생략`, error);
+    }
+    return out
+        .replace(/\{\{char\}\}/gi, charName)
+        .replace(/\{\{user\}\}/gi, userName);
+}
+
+// 선택된 카테고리를 "- 이름 — 카테고리: 내용" 줄 목록으로. 총량 상한을 넘으면 잘라낸다.
+function cardLinkPreferenceText() {
+    const settings = getSettings();
+    if (!settings.cardLinkEnabled) return '';
+    const selected = settings.cardLinkSelected ?? {};
+    const { rows } = cardLinkOptions();
+    const lines = [];
+    let total = 0;
+    for (const row of rows) {
+        if (!Array.isArray(selected[row.charKey]) || !selected[row.charKey].includes(row.catKey)) continue;
+        const body = resolveCardMacros(row.content, row.charName).replace(/\s*\n\s*/g, ' ').trim();
+        if (!body) continue;
+        let line = `- ${row.charName} — ${row.name}: ${body}`;
+        const remaining = CARD_LINK_CHAR_LIMIT - total;
+        if (remaining <= 40) break;
+        if (line.length > remaining) line = `${line.slice(0, remaining - 1)}…`;
+        lines.push(line);
+        total += line.length + 1;
+    }
+    return lines.join('\n');
+}
+
+function buildCardPreferenceLines() {
+    const text = cardLinkPreferenceText();
+    if (!text) return [];
+    return [
+        'CHARACTER PREFERENCES (from the character sheet — inspiration for choosing what happens next, not a checklist. Never force them, and never contradict the current scene state, hard limits, or user-banned items):',
+        text,
+    ];
 }
 
 // ───────────────────────── 주입문 생성 ─────────────────────────
@@ -1010,8 +1124,9 @@ const SLOW_BURN_STATE_REPORT_LINES = [
     'Never use placeholders such as "no change", "no changes", "unchanged", or "same" in location, character state, acts, heat, stage, or next. Never output any acknowledgement, status note, or meta-comment outside the <scene_state> block.',
 ];
 
-function stateReportLines(slowBurnEnabled, dialogueGuard) {
+function stateReportLines(slowBurnEnabled, dialogueGuard, nextGuidance = '') {
     const lines = [...(slowBurnEnabled ? SLOW_BURN_STATE_REPORT_LINES : STATE_REPORT_LINES)];
+    if (nextGuidance) lines.push(nextGuidance);
     if (!dialogueGuard) return lines;
     lines[1] = lines[1].replace(
         ',"acts":',
@@ -1035,7 +1150,7 @@ function buildInjection() {
     const settings = getSettings();
     const { state } = effectiveState();
     const targetActive = slowBurnTargetProgress().active;
-    const dialogueGuard = Boolean(settings.developerMode && settings.dialogueBeatGuard);
+    const dialogueGuard = Boolean(settings.dialogueBeatGuard);
 
     // 무장 전: 해제 브릿지가 걸려 있으면 마무리 지시를 한 번 주입.
     // 그 외엔 스텔스 모드는 아무것도 주입하지 않고, 온도 감시 모드는 온도 한 줄만 요청
@@ -1099,6 +1214,8 @@ function buildInjection() {
     }
 
     if (settings.nextBeatHints && !targetActive) {
+        const preferenceLines = buildCardPreferenceLines();
+        if (preferenceLines.length) sections.push('', ...preferenceLines);
         const beats = nextBeatCandidates();
         if (beats.length) {
             sections.push(
@@ -1118,7 +1235,10 @@ function buildInjection() {
     ].filter(Boolean);
     if (styleParts.length) sections.push('', ...styleParts);
 
-    sections.push('', ...stateReportLines(settings.slowBurnEnabled, dialogueGuard));
+    const nextGuidance = settings.nextBeatHints && !targetActive && cardLinkPreferenceText()
+        ? '"next" rule: draw the candidates from the CHARACTER PREFERENCES above when they fit the current scene and stage. Keep them fresh — never repeat "acts" or anything already banned.'
+        : '';
+    sections.push('', ...stateReportLines(settings.slowBurnEnabled, dialogueGuard, nextGuidance));
 
     // 가장 마지막 지시가 목표 실행 명령이 되도록 다시 고정한다.
     if (targetActive) sections.push('', ...buildTargetFinalEnforcementLines());
@@ -1207,9 +1327,13 @@ function buildRefineInput() {
 function refinePromptMessages() {
     const settings = getSettings();
     const slowBurnEnabled = settings.slowBurnEnabled;
-    const dialogueGuard = Boolean(settings.developerMode && settings.dialogueBeatGuard);
+    const dialogueGuard = Boolean(settings.dialogueBeatGuard);
     const stageSchema = slowBurnEnabled ? ',"stage":1' : '';
     const dialogueSchema = dialogueGuard ? ',"dialogue_beats":["0-3 dialogue intents from the final CHARACTER message, each \'English || 한국어\'"]' : '';
+    const preferenceText = settings.cardLinkEnabled && settings.nextBeatHints ? cardLinkPreferenceText() : '';
+    const preferenceRule = preferenceText
+        ? '\n- "next" should draw on the CHARACTER PREFERENCES given in the user message where they fit the current scene; they are inspiration only, never a checklist.'
+        : '';
     const stageRule = slowBurnEnabled
         ? '\n- "stage" is the scene\'s slow-burn progression as an integer: 1 tension/atmosphere, 2 gaze/words/proximity, 3 initial light contact, 4 deepening contact/reactions, 5 explicit escalation, 6 peak or conclusion permitted.'
         : '';
@@ -1223,10 +1347,10 @@ Rules:
 - Describe the state at the END of the log, factually and concisely. Note removed or displaced clothing explicitly.
 - "acts" must cover only the final CHARACTER message. List ONLY substantive beats (physical/romantic/emotional developments); skip mundane logistics like snacks, drinks, blankets, or remote controls.
 ${dialogueGuard ? '- "dialogue_beats" must list 0-3 conversational intents/functions from spoken CHARACTER dialogue in the final CHARACTER message only. Describe the purpose, not exact wording or quotations. Use [] if there is no spoken dialogue.\n' : ''}${HEAT_SCALE_LINES.join('\n')}${stageRule}
-- "next" must not repeat anything already listed in "acts".
+- "next" must not repeat anything already listed in "acts".${preferenceRule}
 - Include every present character. Use the exact names from the log.
 - If something is unknown, use an empty string. Return the JSON object only.`;
-    const user = `Log excerpt (oldest first):\n\n${buildRefineInput()}`;
+    const user = `${preferenceText ? `CHARACTER PREFERENCES (reference for "next" only):\n${preferenceText}\n\n` : ''}Log excerpt (oldest first):\n\n${buildRefineInput()}`;
     return [
         { role: 'system', content: system },
         { role: 'user', content: user },
@@ -1584,10 +1708,69 @@ function renderSlowBurnPanel(settings) {
     element('tns-slow-burn-auto').disabled = progress.source !== 'manual' && !progress.locked;
 }
 
+function renderCardLinkPanel(settings) {
+    const box = element('tns-card-link-box');
+    if (!box) return;
+    box.hidden = !settings.cardLinkEnabled;
+    element('tns-card-link').checked = Boolean(settings.cardLinkEnabled);
+    if (!settings.cardLinkEnabled) return;
+
+    const list = element('tns-card-link-list');
+    const note = element('tns-card-link-note');
+    list.replaceChildren();
+
+    const { available, rows } = cardLinkOptions();
+    if (!available) {
+        note.textContent = 'CardInject 데이터를 찾지 못했어요. CardInject를 설치하고 이 캐릭터의 캐시트를 분석한 뒤 새로고침해주세요.';
+        return;
+    }
+    if (!rows.length) {
+        note.textContent = '이 채팅 캐릭터에 저장된 CardInject 카테고리가 없어요. CardInject에서 분석하거나 직접 칸을 추가한 뒤 새로고침해주세요.';
+        return;
+    }
+
+    const selected = settings.cardLinkSelected ?? {};
+    let duplicated = 0;
+    let picked = 0;
+    for (const row of rows) {
+        const isSelected = Array.isArray(selected[row.charKey]) && selected[row.charKey].includes(row.catKey);
+        if (isSelected) {
+            picked++;
+            if (row.ciEnabled) duplicated++;
+        }
+        const label = document.createElement('label');
+        label.className = 'tns-setting-row tns-card-link-row';
+        const text = document.createElement('span');
+        const title = document.createElement('strong');
+        title.textContent = `${row.charName} · ${row.name}${row.likely ? ' ★' : ''}`;
+        const meta = document.createElement('small');
+        meta.textContent = `${row.content.length}자 · CardInject에서 ${row.ciEnabled ? '켜져 있음' : '꺼져 있음'}`;
+        text.append(title, meta);
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = isSelected;
+        input.addEventListener('change', () => {
+            const current = getSettings();
+            const chosen = new Set(Array.isArray(current.cardLinkSelected[row.charKey]) ? current.cardLinkSelected[row.charKey] : []);
+            if (input.checked) chosen.add(row.catKey);
+            else chosen.delete(row.catKey);
+            current.cardLinkSelected[row.charKey] = [...chosen];
+            saveSettings();
+            updateUi();
+        });
+        label.append(text, input);
+        list.append(label);
+    }
+    note.textContent = duplicated
+        ? `⚠️ 고른 ${picked}개 중 ${duplicated}개가 CardInject에서도 켜져 있어서 프롬프트에 두 번 들어가요. CardInject에서 그 카테고리를 끄면 개입 중일 때만 주입돼요. (★ = 이름이 성향·취향 관련처럼 보이는 카테고리)`
+        : `고른 ${picked}개는 개입 중일 때만 주입돼요. (★ = 이름이 성향·취향 관련처럼 보이는 카테고리)`;
+}
+
 function renderStatePanel() {
     const { state, source } = effectiveState();
     const settings = getSettings();
     renderSlowBurnPanel(settings);
+    renderCardLinkPanel(settings);
     const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
     element('tns-state-source').textContent = refineRunning ? '보조 AI 분석 중…' : sourceLabel;
 
@@ -1664,7 +1847,9 @@ function renderStatePanel() {
 
     // 개발자 실험실: 최근 대사 의도 목록
     const dialogueSection = element('tns-dialogue-section');
-    const dialogueEnabled = Boolean(settings.developerMode && settings.dialogueBeatGuard);
+    const dialogueEnabled = Boolean(settings.dialogueBeatGuard);
+    const dialogueSummary = element('tns-dialogue-summary');
+    if (dialogueSummary) dialogueSummary.textContent = `최근 ${settings.dialogueWindow}개의 AI 답변에서 이미 사용한 대사의 목적이에요.`;
     dialogueSection.hidden = !dialogueEnabled;
     const dialogueList = element('tns-dialogue-list');
     dialogueList.replaceChildren();
@@ -1829,8 +2014,10 @@ function updateUi() {
         const keywordsInput = element('tns-stealth-keywords');
         if (document.activeElement !== keywordsInput) keywordsInput.value = String(settings.stealthKeywords ?? '');
         element('tns-next-hints').checked = Boolean(settings.nextBeatHints);
-        element('tns-dialogue-guard-setting').hidden = !settings.developerMode;
         element('tns-dialogue-guard').checked = Boolean(settings.dialogueBeatGuard);
+        element('tns-dialogue-window').value = String(settings.dialogueWindow);
+        element('tns-dialogue-window').disabled = !settings.dialogueBeatGuard;
+        element('tns-dialogue-window-value').textContent = `${settings.dialogueWindow}개`;
         element('tns-auto-refine').checked = Boolean(settings.autoRefine);
 
         element('tns-adult-warning').hidden = Boolean(settings.adultConfirmed);
@@ -1917,6 +2104,21 @@ function bindUi() {
     bindSetting('tns-stealth-keywords', 'stealthKeywords', String);
     bindSetting('tns-next-hints', 'nextBeatHints', Boolean);
     bindSetting('tns-dialogue-guard', 'dialogueBeatGuard', Boolean);
+    bindSetting('tns-card-link', 'cardLinkEnabled', Boolean);
+    element('tns-card-link-refresh').addEventListener('click', () => {
+        updateUi();
+        toastr.info('CardInject 카테고리 목록을 다시 읽었어요.', '🔞또또NSFW');
+    });
+    const dialogueSlider = element('tns-dialogue-window');
+    dialogueSlider.addEventListener('input', () => {
+        element('tns-dialogue-window-value').textContent = `${dialogueSlider.value}개`;
+    });
+    dialogueSlider.addEventListener('change', () => {
+        const settings = getSettings();
+        settings.dialogueWindow = Math.min(6, Math.max(1, Number(dialogueSlider.value) || DIALOGUE_BEAT_WINDOW));
+        saveSettings();
+        updateUi();
+    });
     bindSetting('tns-pace-mode', 'paceMode', String);
     bindSetting('tns-slow-burn-enabled', 'slowBurnEnabled', Boolean, (settings) => {
         const meta = getChatMeta(false);
@@ -2238,6 +2440,9 @@ async function initializeUi() {
         'tns-slow-burn-stage',
         'tns-refine',
         'tns-state-location',
+        'tns-dialogue-window',
+        'tns-card-link',
+        'tns-card-link-list',
     ];
     const missing = required.filter((id) => !document.getElementById(id));
     if (missing.length) throw new Error(`설정 패널 요소 누락: ${missing.join(', ')}`);

@@ -111,8 +111,8 @@
         <div id="tns-dialogue-section" class="tns-dialogue-section" hidden>
           <div class="tns-section-head tns-acts-head">
             <div>
-              <strong>🧪 최근 대사 전개</strong>
-              <small>최근 2개의 AI 답변에서 이미 사용한 대사의 목적이에요.</small>
+              <strong>💬 최근 대사 전개</strong>
+              <small id="tns-dialogue-summary">최근 2개의 AI 답변에서 이미 사용한 대사의 목적이에요.</small>
             </div>
           </div>
           <div id="tns-dialogue-list" class="tns-acts-list"></div>
@@ -209,13 +209,35 @@
           <input id="tns-next-hints" type="checkbox">
         </label>
 
-        <label id="tns-dialogue-guard-setting" class="tns-setting-row" for="tns-dialogue-guard" hidden>
+        <label id="tns-card-link-setting" class="tns-setting-row" for="tns-card-link">
           <span>
-            <strong>🧪 대사 전개 반복 방지</strong>
-            <small>최근 2개의 AI 답변에서 같은 질문·부탁·칭찬·도발 같은 대사의 목적이 말만 바뀌어 반복되는 것을 막아요. 문장 표현을 관리하는 기본 또또와는 별개예요.</small>
+            <strong>🧩 CardInject 연동</strong>
+            <small>CardInject가 분석해둔 캐시트 카테고리 중 고른 것을 다음 전개 힌트의 참고 자료로 써요. 개입 중일 때만 주입되고, 다음 전개 힌트가 켜져 있어야 동작해요. 보조 AI 보정 호출에도 같이 전달돼요.</small>
+          </span>
+          <input id="tns-card-link" type="checkbox">
+        </label>
+
+        <div id="tns-card-link-box" class="tns-card-link-box" hidden>
+          <div id="tns-card-link-list"></div>
+          <small id="tns-card-link-note"></small>
+          <button id="tns-card-link-refresh" class="menu_button" type="button">
+            <i class="fa-solid fa-rotate" aria-hidden="true"></i> 카테고리 목록 새로고침
+          </button>
+        </div>
+
+        <label id="tns-dialogue-guard-setting" class="tns-setting-row" for="tns-dialogue-guard">
+          <span>
+            <strong>💬 대사 전개 반복 방지</strong>
+            <small>최근 AI 답변에서 같은 질문·부탁·칭찬·도발 같은 대사의 목적이 말만 바뀌어 반복되는 것을 막아요. 문장 표현을 관리하는 기본 또또와는 별개예요. 모델이 상태 태그에 대사 의도를 적어줘야 동작하고, 빠뜨려도 그것 때문에 보조 호출이 나가지는 않아요.</small>
           </span>
           <input id="tns-dialogue-guard" type="checkbox">
         </label>
+
+        <div class="tns-field">
+          <span>대사 반복 금지 범위 <b id="tns-dialogue-window-value">2개</b></span>
+          <input id="tns-dialogue-window" type="range" min="1" max="6" step="1" value="2">
+          <small>최근 몇 개의 AI 답변에서 쓴 대사 의도를 "또 하지 마" 목록에 올릴지 정해요. 넓힐수록 같은 대사 기능이 오래 안 돌아와요.</small>
+        </div>
 
         <div class="tns-field">
           <span>반복 금지 범위 <b id="tns-repeat-window-value">3턴</b></span>

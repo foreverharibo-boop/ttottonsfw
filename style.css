@@ -479,3 +479,23 @@
 .ttotto-nsfw-settings .tns-section-head .menu_button {
     flex-shrink: 0;
 }
+
+/* ── CardInject 연동 ── */
+.ttotto-nsfw-settings .tns-card-link-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 4px 0 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.35));
+    border-radius: 8px;
+}
+
+.ttotto-nsfw-settings .tns-card-link-box > small {
+    opacity: 0.8;
+    line-height: 1.45;
+}
+
+.ttotto-nsfw-settings .tns-card-link-row {
+    margin: 0;
+}
