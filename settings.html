@@ -37,6 +37,14 @@
           <button id="tns-toggle-preview" class="menu_button" type="button">주입문 보기</button>
         </div>
 
+        <div id="tns-prompt-preview" class="tns-prompt-preview" hidden>
+          <div class="tns-preview-head">
+            <strong>실제 주입 예정</strong>
+            <span id="tns-prompt-size" class="tns-count">0자</span>
+          </div>
+          <pre id="tns-prompt-text"></pre>
+        </div>
+
         <div id="tns-slow-burn-card" class="tns-slow-burn-card" hidden>
           <div id="tns-slow-burn-target-box" class="tns-slow-burn-target-box" hidden>
             <label class="tns-field" for="tns-slow-burn-target">
@@ -134,14 +142,6 @@
             <span aria-hidden="true">💡</span>
             <span>제안된 후보가 아직 없어요</span>
           </div>
-        </div>
-
-        <div id="tns-prompt-preview" class="tns-prompt-preview" hidden>
-          <div class="tns-preview-head">
-            <strong>실제 주입 예정</strong>
-            <span id="tns-prompt-size" class="tns-count">0자</span>
-          </div>
-          <pre id="tns-prompt-text"></pre>
         </div>
 
         <div class="tns-button-row">

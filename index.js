@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.0';
+const EXTENSION_VERSION = '0.13.1';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -1978,6 +1978,61 @@ function renderStatePanel() {
     }
 }
 
+// ───────────────────────── 주입문 크기 표시 (글자 수 + 토큰 수) ─────────────────────────
+// 토큰 수는 ST에 지금 설정된 토크나이저로 세고, 못 세면 대략치(약)로 보여준다.
+let promptTokenSeq = 0;
+let promptTokenCache = { text: null, label: '' };
+
+function estimateTokens(text) {
+    let ascii = 0;
+    let other = 0;
+    for (const char of String(text ?? '')) {
+        if (char.charCodeAt(0) < 128) ascii++;
+        else other++;
+    }
+    return Math.ceil(ascii / 4 + other * 1.5);
+}
+
+async function countPromptTokens(text) {
+    const context = getContext();
+    const counter = context.getTokenCountAsync ?? context.getTokenCount;
+    if (typeof counter === 'function') {
+        try {
+            const value = Number(await counter.call(context, text));
+            if (Number.isFinite(value) && value >= 0) return { count: Math.round(value), exact: true };
+        } catch (error) {
+            console.debug(`${LOG_PREFIX} 토큰 계산 실패 — 대략치로 표시`, error);
+        }
+    }
+    return { count: estimateTokens(text), exact: false };
+}
+
+function refreshPromptSize(prompt) {
+    const sizeElement = element('tns-prompt-size');
+    if (!sizeElement) return;
+    const chars = String(prompt ?? '').length;
+    if (!chars) {
+        promptTokenSeq++;
+        sizeElement.textContent = '0자 · 0토큰';
+        return;
+    }
+    const charLabel = `${chars.toLocaleString()}자`;
+    if (promptTokenCache.text === prompt) {
+        sizeElement.textContent = `${charLabel} · ${promptTokenCache.label}`;
+        return;
+    }
+    // 정확한 값이 오기 전까지는 대략치를 먼저 보여줘서 깜빡이지 않게 한다.
+    sizeElement.textContent = `${charLabel} · 약 ${estimateTokens(prompt).toLocaleString()}토큰`;
+    const seq = ++promptTokenSeq;
+    void countPromptTokens(prompt).then(({ count, exact }) => {
+        if (seq !== promptTokenSeq) return;
+        const label = `${exact ? '' : '약 '}${count.toLocaleString()}토큰`;
+        promptTokenCache = { text: prompt, label };
+        const current = element('tns-prompt-size');
+        if (current) current.textContent = `${charLabel} · ${label}`;
+    });
+}
+
 function updateUi() {
     if (!uiReady) return;
     try {
@@ -2047,7 +2102,7 @@ function updateUi() {
         if (!preview.hidden) {
             const prompt = armed ? buildInjection() : '';
             element('tns-prompt-text').textContent = prompt || '(지금은 주입할 내용이 없어요)';
-            element('tns-prompt-size').textContent = `${prompt.length}자`;
+            refreshPromptSize(prompt);
         }
     } catch (error) {
         console.error(`${LOG_PREFIX} UI 갱신 실패`, error);
