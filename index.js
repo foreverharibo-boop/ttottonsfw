@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.1';
+const EXTENSION_VERSION = '0.13.2';
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -2390,6 +2390,27 @@ function bindUi() {
 
 // ───────────────────────── 팝업 (완드 메뉴 빠른 접근) ─────────────────────────
 // 설정 패널 DOM을 통째로 팝업으로 옮겼다가 닫을 때 되돌린다 — 모든 기능·바인딩이 그대로 동작.
+// 모바일 우선: 중앙 고정과 가로 스크롤 차단을 열 때마다 인라인 !important로 강제한다.
+// (MovingUI의 transform 및 실리태번 테마의 전역 CSS 오버라이드 대응)
+
+const TNS_OVERLAY_BASE_CSS = [
+    'position:fixed !important', 'top:0 !important', 'left:0 !important', 'right:0 !important',
+    'bottom:0 !important', 'width:100vw !important', 'height:100vh !important', 'margin:0 !important',
+    'padding:16px !important', 'box-sizing:border-box !important', 'z-index:99990 !important',
+    'background-color:rgba(12,12,16,0.55) !important', 'align-items:center !important',
+    'justify-content:center !important', 'transform:none !important', '-webkit-transform:none !important',
+].join('; ');
+
+const TNS_POPUP_BOX_CSS = [
+    'box-sizing:border-box !important', 'width:100% !important', 'min-width:0 !important',
+    'max-width:460px !important', 'max-height:88vh !important', 'display:flex !important',
+    'flex-direction:column !important', 'position:relative !important', 'z-index:99991 !important',
+    'border-radius:14px !important', 'overflow:hidden !important', 'margin:0 auto !important',
+    'transform:none !important', 'background-color:var(--SmartThemeBlurTintColor, #1b1b22) !important',
+    'color:var(--SmartThemeBodyColor, #ddd) !important',
+    'border:1px solid rgba(128,128,128,0.35) !important',
+    'box-shadow:0 16px 40px rgba(0,0,0,0.4) !important',
+].join('; ');
 
 function buildPopupShell() {
     if (document.getElementById('tns-overlay')) return;
@@ -2397,7 +2418,7 @@ function buildPopupShell() {
     overlay.id = 'tns-overlay';
     overlay.className = 'tns-overlay';
     overlay.innerHTML = [
-        '<div class="tns-popup">',
+        '<div id="tns-popup-box" class="tns-popup">',
         '  <div class="tns-popup-header">',
         '    <strong id="tns-popup-developer-title">🔞 또또NSFW</strong>',
         '    <button id="tns-popup-close" class="menu_button" type="button" title="닫기">✕</button>',
@@ -2425,14 +2446,20 @@ function openPopup() {
     buildPopupShell();
     const panel = document.getElementById('ttotto-nsfw-settings');
     const overlay = document.getElementById('tns-overlay');
-    if (!panel || !overlay) return;
+    const box = document.getElementById('tns-popup-box');
+    if (!panel || !overlay || !box) return;
     if (!settingsHomeParent) settingsHomeParent = panel.parentElement;
     document.getElementById('tns-popup-body').append(panel);
     panel.classList.add('tns-in-popup');
     // 드로어가 접혀 있었어도 팝업에서는 무조건 펼침 (인라인 강제)
     const drawerContent = panel.querySelector('.inline-drawer-content');
     if (drawerContent) drawerContent.style.setProperty('display', 'block', 'important');
-    overlay.classList.add('open');
+    overlay.style.cssText = `display:flex !important; ${TNS_OVERLAY_BASE_CSS}`;
+    box.style.cssText = TNS_POPUP_BOX_CSS;
+    const header = box.querySelector('.tns-popup-header');
+    if (header) header.style.cssText = 'display:flex !important; align-items:center !important; justify-content:space-between !important; gap:8px !important; padding:10px 14px !important; border-bottom:1px solid rgba(128,128,128,0.25) !important; flex-shrink:0 !important;';
+    const body = document.getElementById('tns-popup-body');
+    if (body) body.style.cssText = 'box-sizing:border-box !important; width:100% !important; min-width:0 !important; max-width:100% !important; overflow-y:auto !important; overflow-x:hidden !important; overscroll-behavior-x:none !important; touch-action:pan-y !important; padding:8px 14px 14px !important; -webkit-overflow-scrolling:touch;';
     popupOpen = true;
     updateUi();
 }
@@ -2440,7 +2467,7 @@ function openPopup() {
 function closePopup() {
     const overlay = document.getElementById('tns-overlay');
     const panel = document.getElementById('ttotto-nsfw-settings');
-    overlay?.classList.remove('open');
+    if (overlay) overlay.style.cssText = `display:none !important; ${TNS_OVERLAY_BASE_CSS}`;
     if (panel && settingsHomeParent) {
         panel.classList.remove('tns-in-popup');
         const drawerContent = panel.querySelector('.inline-drawer-content');
