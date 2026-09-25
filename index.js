@@ -13,7 +13,8 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.2';
+const EXTENSION_VERSION = '0.13.3';
+const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
 const DEVELOPER_TAP_RESET_MS = 5000;
@@ -106,9 +107,9 @@ const STEALTH_LEXICON = [
 ];
 
 const DEFAULT_SETTINGS = Object.freeze({
-    settingsSchemaVersion: 2,
+    settingsSchemaVersion: 3,
     enabled: true,
-    adultConfirmed: false,
+    adultConfirmed: true,
     developerMode: false,
     dialogueBeatGuard: true, // 최근 대사 의도·기능 반복 방지 (0.13.0부터 일반 기능, 신규 설치 기본 켬)
     dialogueWindow: 2, // 대사 의도를 "또 하지 마" 목록에 올릴 최근 AI 답변 수 (1~6)
@@ -170,7 +171,10 @@ function getSettings() {
     }
     // v2: UI 추천값과 실제 기본값을 자동으로 통일한다.
     if (previousSchemaVersion < 2 && settings.paceMode === 'slow') settings.paceMode = 'auto';
-    settings.settingsSchemaVersion = 2;
+    // v3: 성인 확인은 신규 설치와 기존 설치 모두 최초 1회 기본 ON으로 전환한다.
+    // 이후 사용자가 직접 끄면 스키마 버전이 유지되므로 다시 강제로 켜지지 않는다.
+    if (previousSchemaVersion < 3) settings.adultConfirmed = true;
+    settings.settingsSchemaVersion = 3;
     // 상태 JSON은 짧으므로 과도한 출력 상한을 제한해 보조 호출 비용을 줄인다.
     const refineTokens = Number(settings.refineMaxTokens);
     settings.refineMaxTokens = Number.isFinite(refineTokens)
@@ -184,7 +188,7 @@ function getSettings() {
     if (!settings.cardLinkSelected || typeof settings.cardLinkSelected !== 'object' || Array.isArray(settings.cardLinkSelected)) {
         settings.cardLinkSelected = {};
     }
-    if (previousSchemaVersion < 2 || settings.refineMaxTokens !== refineTokens) {
+    if (previousSchemaVersion < 3 || settings.refineMaxTokens !== refineTokens) {
         context.saveSettingsDebounced?.();
     }
     return settings;
@@ -245,10 +249,12 @@ function handleDeveloperTitleTap(event) {
 function getChatMeta(create = true) {
     const context = getContext();
     if (!context.chatMetadata || typeof context.chatMetadata !== 'object') return null;
+    let needsSave = false;
     if (!context.chatMetadata[CHAT_STATE_KEY]) {
         if (!create) return null;
         context.chatMetadata[CHAT_STATE_KEY] = {
-            enabled: false,
+            chatSchemaVersion: CHAT_STATE_SCHEMA_VERSION,
+            enabled: true,
             manualState: null,
             ignoredActs: [],
             autoArmed: false,
@@ -263,8 +269,17 @@ function getChatMeta(create = true) {
             slowBurnTargetCompleted: false,
             ignoredDialogueBeats: [],
         };
+        needsSave = true;
     }
     const meta = context.chatMetadata[CHAT_STATE_KEY];
+    const previousChatSchemaVersion = Number(meta.chatSchemaVersion) || 0;
+    // 최초 업데이트 때만 기존 채팅의 사용 토글을 기본 ON으로 맞춘다.
+    // 이후 사용자가 직접 끈 값은 chatSchemaVersion이 남아 그대로 보존된다.
+    if (previousChatSchemaVersion < CHAT_STATE_SCHEMA_VERSION) {
+        meta.enabled = true;
+        meta.chatSchemaVersion = CHAT_STATE_SCHEMA_VERSION;
+        needsSave = true;
+    }
     if (!Array.isArray(meta.ignoredActs)) meta.ignoredActs = [];
     if (!Array.isArray(meta.ignoredDialogueBeats)) meta.ignoredDialogueBeats = [];
     if (!Array.isArray(meta.customBans)) meta.customBans = [];
@@ -273,6 +288,7 @@ function getChatMeta(create = true) {
     meta.slowBurnTargetTurns = clampSlowBurnTargetTurns(meta.slowBurnTargetTurns);
     meta.slowBurnTargetActive = Boolean(meta.slowBurnTargetActive && meta.slowBurnTarget);
     meta.slowBurnTargetCompleted = Boolean(meta.slowBurnTargetCompleted && meta.slowBurnTarget);
+    if (needsSave) saveChatMeta();
     return meta;
 }
 
@@ -1259,7 +1275,7 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
     try {
         if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) return;
         const settings = getSettings();
-        const meta = getChatMeta(false);
+        const meta = getChatMeta();
         // 채팅 토글로 수동 해제한 뒤에는 감시 자체가 꺼져도 다음 생성 한 번의 브릿지만 통과시킨다.
         const bridgeOnly = Boolean(
             runtimeActive
@@ -2037,7 +2053,8 @@ function updateUi() {
     if (!uiReady) return;
     try {
         const settings = getSettings();
-        const meta = getChatMeta(false);
+        // 새 채팅도 설정 화면을 여는 즉시 기본 사용 상태를 생성·저장한다.
+        const meta = getChatMeta();
 
         const popupDeveloperTitle = element('tns-popup-developer-title');
         if (popupDeveloperTitle) {
