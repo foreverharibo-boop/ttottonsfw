@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.4';
+const EXTENSION_VERSION = '0.13.5';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1305,9 +1305,13 @@ function clearInjectedPrompt() {
 }
 
 globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGenerationInterceptor(_chat, _contextSize, _abort, type) {
+    // 숨은 생성이 시작됐다는 이유만으로 앞서 등록한 상태 지시를 지우지 않는다.
+    // quiet에서는 새 주입·상태 변경·브릿지 소모도 하지 않고 기존 등록을 그대로 둔다.
+    const generationType = String(type ?? '').trim().toLocaleLowerCase();
+    if (generationType === 'quiet') return;
     clearInjectedPrompt();
     try {
-        if (!ALLOWED_GENERATION_TYPES.has(String(type ?? '').toLocaleLowerCase())) return;
+        if (!ALLOWED_GENERATION_TYPES.has(generationType)) return;
         const settings = getSettings();
         const meta = getChatMeta();
         // 채팅 토글로 수동 해제한 뒤에는 감시 자체가 꺼져도 다음 생성 한 번의 브릿지만 통과시킨다.
