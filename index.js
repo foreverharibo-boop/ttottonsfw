@@ -13,7 +13,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.3';
+const EXTENSION_VERSION = '0.13.4';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -82,9 +82,9 @@ const AUTO_ARM_ON = 5;
 const AUTO_ARM_OFF = 2;
 
 // 스텔스 모드 로컬 감지: 최근 메시지에서 NSFW 신호를 점수화 (주입·호출 없음)
-const STEALTH_WINDOW = 4; // 최근 몇 개 메시지를 스캔할지
-const STEALTH_THRESHOLDS = Object.freeze({ high: 4, normal: 6, low: 9 });
-const STEALTH_COLD_STREAK = 3; // 이 턴 수 연속 신호 0점이면 온도와 무관하게 개입 해제
+const STEALTH_WINDOW = 2; // 현재 유저 행동과 그 직전 응답까지만 본다
+const STEALTH_THRESHOLDS = Object.freeze({ high: 3, normal: 4, low: 7 });
+const STEALTH_COLD_STREAK = 2; // 현재 행위 신호가 양쪽에서 사라지면 빠르게 SFW에 인계
 const REFINE_MESSAGE_CHAR_LIMIT = 12000;
 const REFINE_TOTAL_CHAR_LIMIT = 60000;
 
@@ -96,14 +96,14 @@ const HEAT_SCALE_LINES = Object.freeze([
     '- 7-8: sustained explicit sexual activity or intensifying stimulation; 9: climax is imminent; 10: peak/climax or immediate conclusion.',
 ]);
 const STEALTH_LEXICON = [
-    // 강한 신호 (3점): 명시적 행위·신체
-    { label: '명시적 표현', re: /삽입|절정|사정|오르가즘|음경|성기|질\s*안|클리|유두|허리를\s*박|안에\s*들어오|안을\s*채우|몸\s*안에|하나가\s*되|thrust(?:ing|s)?|orgasm|climax|cock|pussy|nipple|entrance|inside\s+her|inside\s+him/gi, w: 3 },
+    // 신체 명칭·옷차림·직전 장면의 잔여물은 제외하고, 지금 진행되는 성적 행동만 강한 신호로 본다.
+    { label: '현재 명시적 행위', re: /삽입(?:하|했|해|되|된|되는|중)|박아\s*넣|쑤셔\s*넣|사정(?:하|했|해|시키|하며|하는|하려)|오르가즘(?:에|을)\s*(?:도달|느끼)|성기를\s*(?:넣|밀어\s*넣|움직|빨|핥)|질\s*(?:안|속)에\s*(?:넣|박)|penetrat(?:e|ed|ing)|thrust(?:ed|ing|s)?\s+(?:inside|into|against)|orgasm(?:ed|ing)|came\s+(?:inside|over|on)|coming\s+(?:inside|in\s+her|in\s+him)/gi, w: 4 },
     // 신음 표기 (3점)
     { label: '신음 표기', re: /하앙|흐응|아앙|으응|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, w: 3 },
-    // 중간 신호 (2점): 탈의·밀착·애무
-    { label: '탈의·밀착', re: /벗기|벗겨|탈의|알몸|나체|속옷|브래지어|팬티|지퍼를\s*내리|단추를\s*풀|신음|헐떡|핥|빨아|깨물|침대에\s*눕히|다리\s*사이|허벅지\s*안쪽|가슴을\s*움켜|가슴을\s*쓸|몸을\s*겹치|밀어\s*넘어뜨리|undress|strip(?:ped|ping)?|naked|underwear|lick(?:ed|ing|s)?|suck(?:ed|ing|s)?|grind(?:ed|ing|s)?|straddl(?:e|ed|ing)|between\s+(?:her|his)\s+thighs/gi, w: 2 },
-    // 약한 신호 (1점): 달아오르는 분위기
-    { label: '분위기', re: /키스가\s*깊어|입술을\s*탐|혀가\s*얽|숨이\s*가빠|숨이\s*거칠|달아오|몸이\s*뜨거|열기가\s*번지|목덜미에\s*입|귓불을|허리를\s*끌어당|kiss\s+deepen|breath(?:ing)?\s+(?:hitch|ragged|heavy)|heat\s+pool|shiver(?:ed|ing)?\s+under/gi, w: 1 },
+    // 중간 신호 (2점): 직접적인 탈의·애무 행동
+    { label: '현재 탈의·애무', re: /(?:옷|속옷|팬티|브래지어|바지|치마)를?\s*(?:벗기|벗겨|내리)|가슴을\s*(?:움켜|주무|빨|핥)|성기를\s*(?:잡|쥐|문지)|lick(?:ed|ing|s)?\s+(?:her|his|their|the)?\s*(?:breasts?|nipples?|clit|pussy|cock|dick)|suck(?:ed|ing|s)?\s+(?:on\s+)?(?:her|his|their|the)?\s*(?:breasts?|nipples?|clit|pussy|cock|dick)|grind(?:ed|ing|s)?\s+(?:against|on|into)|straddl(?:e|ed|ing)\s+(?:her|him|them)/gi, w: 2 },
+    // 약한 신호는 단독으로 무장 기준에 도달하지 않는다.
+    { label: '성적 접촉 분위기', re: /키스가\s*깊어|혀가\s*얽|목덜미에\s*입|귓불을\s*(?:물|빨|핥)|kiss(?:ed|ing)?\s+(?:deeply|hungrily)|tongues?\s+(?:tangled|met)|hands?\s+(?:slid|moved)\s+(?:under|between)/gi, w: 1 },
 ];
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -258,6 +258,7 @@ function getChatMeta(create = true) {
             manualState: null,
             ignoredActs: [],
             autoArmed: false,
+            sfwImmediateHandoff: false,
             slowBurnStageOverride: null,
             slowBurnLocked: false,
             slowBurnSessionActive: false,
@@ -283,6 +284,7 @@ function getChatMeta(create = true) {
     if (!Array.isArray(meta.ignoredActs)) meta.ignoredActs = [];
     if (!Array.isArray(meta.ignoredDialogueBeats)) meta.ignoredDialogueBeats = [];
     if (!Array.isArray(meta.customBans)) meta.customBans = [];
+    meta.sfwImmediateHandoff = Boolean(meta.sfwImmediateHandoff);
     if (typeof meta.slowBurnTarget !== 'string') meta.slowBurnTarget = '';
     meta.slowBurnTarget = sanitizeSlowBurnTarget(meta.slowBurnTarget);
     meta.slowBurnTargetTurns = clampSlowBurnTargetTurns(meta.slowBurnTargetTurns);
@@ -387,6 +389,7 @@ function forceToggleArm() {
         meta.enabled = !wasEnabled;
         if (!meta.enabled) {
             meta.bridgePending = Boolean(settings.exitBridge);
+            meta.sfwImmediateHandoff = false;
             resetSlowBurnSession(meta);
         } else {
             meta.bridgePending = false;
@@ -402,6 +405,7 @@ function forceToggleArm() {
         meta.autoArmed = false;
         meta.forceArmed = false;
         meta.bridgePending = Boolean(settings.exitBridge);
+        meta.sfwImmediateHandoff = false;
         resetSlowBurnSession(meta);
         const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
         meta.stealthCooldownFrom = chat.length;
@@ -409,6 +413,7 @@ function forceToggleArm() {
     } else {
         meta.autoArmed = true;
         meta.forceArmed = true; // 강제 무장 중엔 "신호 없음"을 이유로 자동 해제하지 않음 (온도 해제는 유효)
+        meta.sfwImmediateHandoff = false;
         toastr.info('지금부터 연속성 개입을 시작해요.', '🔞또또NSFW');
         if (settings.autoRefine) {
             clearTimeout(refineTimer);
@@ -429,6 +434,7 @@ function maybeStealthArm() {
     const score = stealthWindowScore();
     if (score < threshold) return false;
     meta.autoArmed = true;
+    meta.sfwImmediateHandoff = false;
     saveChatMeta();
     toastr.info(`NSFW 신호 감지 (점수 ${score}) — 연속성 개입을 시작해요.`, '🔞또또NSFW');
     if (settings.autoRefine) {
@@ -436,6 +442,34 @@ function maybeStealthArm() {
         refineTimer = setTimeout(() => { void runRefine(); }, 400);
     }
     updateUi();
+    return true;
+}
+
+// 이미 현재 행동 신호가 사라진 장면은 다음 생성 전에 즉시 해제한다.
+// 과거 신체 묘사만 남은 상태에서 불필요한 마무리 브릿지를 다시 넣지 않는다.
+function maybeStealthRelease() {
+    const settings = getSettings();
+    const meta = getChatMeta(false);
+    if (settings.armMode === 'manual' || !meta?.autoArmed || meta.forceArmed || !stealthColdStreak()) return false;
+    const prematureSlowBurnEnd = settings.slowBurnEnabled
+        && meta.slowBurnSessionActive
+        && !slowBurnProgress(settings).canConclude;
+    if (prematureSlowBurnEnd) {
+        meta.slowBurnRecoveryPending = true;
+        meta.bridgePending = false;
+        saveChatMeta();
+        return false;
+    }
+    meta.autoArmed = false;
+    meta.forceArmed = false;
+    meta.bridgePending = false;
+    meta.sfwImmediateHandoff = true;
+    resetSlowBurnSession(meta);
+    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+    meta.stealthCooldownFrom = chat.length;
+    saveChatMeta();
+    toastr.info('현재 성적 행동이 끝난 것을 감지해 또또SFW로 인계해요.', '🔞또또NSFW');
+    if (uiReady) updateUi();
     return true;
 }
 
@@ -1294,6 +1328,7 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
             return;
         }
         if (!isSupervising()) return;
+        maybeStealthRelease(); // 유저가 이미 일상 장면으로 전환했다면 이번 생성부터 바로 해제
         maybeStealthArm(); // 방금 보낸 유저 메시지까지 반영해 생성 직전에 감지
         if (settings.slowBurnEnabled && isFullyArmed()) startSlowBurnSessionIfNeeded();
         const prompt = buildInjection();
@@ -1535,6 +1570,7 @@ function handleIncomingMessage(index) {
     if (state?.heat !== null && state?.heat !== undefined && settings.armMode !== 'manual') {
         if (!meta.autoArmed && state.heat >= AUTO_ARM_ON) {
             meta.autoArmed = true;
+            meta.sfwImmediateHandoff = false;
             saveChatMeta();
             toastr.info(`장면 온도 ${state.heat}/10 — 연속성 개입을 시작해요.`, '🔞또또NSFW');
             // 감시 모드에서는 온도만 수집했으므로, 무장 직후 보조 AI로 전체 상태를 백필
@@ -1557,6 +1593,7 @@ function handleIncomingMessage(index) {
                 meta.autoArmed = false;
                 meta.forceArmed = false;
                 meta.bridgePending = Boolean(settings.exitBridge); // 다음 생성 한 번은 장면 마무리 지시
+                meta.sfwImmediateHandoff = false;
                 resetSlowBurnSession(meta);
                 if (settings.armMode === 'stealth') {
                     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
@@ -1572,24 +1609,7 @@ function handleIncomingMessage(index) {
     }
     // 해제 폴백: 모델의 온도 보고와 무관하게, 최근 턴들이 연속으로 신호 0점이면 개입 해제
     // (모델이 온도를 계속 높게 불러서 일상 장면에까지 진행 지시가 들어가는 것 방지)
-    if (settings.armMode !== 'manual' && meta.autoArmed && !meta.forceArmed && stealthColdStreak()) {
-        const prematureSlowBurnEnd = settings.slowBurnEnabled
-            && meta.slowBurnSessionActive
-            && !slowBurnProgress(settings).canConclude;
-        if (prematureSlowBurnEnd) {
-            meta.slowBurnRecoveryPending = true;
-            meta.bridgePending = false;
-            saveChatMeta();
-        } else {
-            meta.autoArmed = false;
-            meta.bridgePending = Boolean(settings.exitBridge);
-            resetSlowBurnSession(meta);
-            const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
-            meta.stealthCooldownFrom = chat.length;
-            saveChatMeta();
-            toastr.info(`장면 신호가 ${STEALTH_COLD_STREAK}턴째 없어요 — 개입을 해제해요.`, '🔞또또NSFW');
-        }
-    }
+    if (settings.armMode !== 'manual') maybeStealthRelease();
     if (changed) {
         rerenderMessage(index, message);
         persistChat();
@@ -2577,6 +2597,7 @@ function registerEvents() {
         refineAbortController?.abort();
         clearInjectedPrompt();
         populateProfiles();
+        maybeStealthRelease();
         updateUi();
     });
     listen('CHAT_CREATED', () => updateUi());
@@ -2597,6 +2618,7 @@ function unregisterEvents() {
 async function initialize() {
     runtimeActive = true;
     getSettings();
+    maybeStealthRelease();
     registerEvents();
     await initializeUi();
     console.log(`${LOG_PREFIX} v${EXTENSION_VERSION} 로드 완료`);
@@ -2605,6 +2627,7 @@ async function initialize() {
 export function onEnable() {
     runtimeActive = true;
     registerEvents();
+    maybeStealthRelease();
     if (uiReady) addWandButton();
     updateUi();
 }
