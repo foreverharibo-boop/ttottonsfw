@@ -77,7 +77,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.7';
+const EXTENSION_VERSION = '0.13.8';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -379,12 +379,12 @@ function nsfwScore(text) {
     return nsfwScoreDetail(text).score;
 }
 
-function stealthWindowDetail() {
+function stealthWindowDetail({ ignoreCooldown = false } = {}) {
     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
     // 해제 직후 직전 장면의 잔열로 곧바로 재무장하는 것 방지: 쿨다운 마커 이후 메시지만 스캔
     const storedFrom = Number(getChatMeta(false)?.stealthCooldownFrom ?? 0);
     // 메시지 삭제나 스와이프로 길이가 줄어든 채팅에 남은 마커는 무효화한다.
-    const from = Number.isInteger(storedFrom) && storedFrom >= 0 && storedFrom <= chat.length ? storedFrom : 0;
+    const from = !ignoreCooldown && Number.isInteger(storedFrom) && storedFrom >= 0 && storedFrom <= chat.length ? storedFrom : 0;
     const recent = chat
         .map((message, index) => ({ message, index }))
         .filter(({ message, index }) => message && !message.is_system && index >= from)
@@ -444,9 +444,11 @@ function forceToggleArm() {
         resetSlowBurnSession(meta);
         const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
         meta.stealthCooldownFrom = chat.length;
+        meta.stealthCooldownReason = 'manual';
         toastr.info('개입을 해제하고 대기로 돌아가요.', '🔞또또NSFW');
     } else {
         meta.autoArmed = true;
+        meta.armSource = 'manual';
         meta.forceArmed = true; // 강제 무장 중엔 "신호 없음"을 이유로 자동 해제하지 않음 (온도 해제는 유효)
         meta.sfwImmediateHandoff = false;
         toastr.info('지금부터 연속성 개입을 시작해요.', '🔞또또NSFW');
@@ -459,16 +461,22 @@ function forceToggleArm() {
     updateUi();
 }
 
-// 스텔스 모드에서 NSFW 신호가 기준을 넘으면 무장. 주입도 호출도 없이 로컬 스캔만 사용.
+// 두 자동 모드 모두 본문 감지를 사용한다. 온도 태그만으로 진입을 제한하지 않는다.
 function maybeStealthArm() {
     const settings = getSettings();
-    if (settings.armMode !== 'stealth' || !isSupervising()) return false;
+    if (settings.armMode === 'manual' || !isSupervising()) return false;
     const meta = getChatMeta(false);
     if (!meta || meta.autoArmed) return false;
     const threshold = STEALTH_THRESHOLDS[settings.stealthSensitivity] ?? STEALTH_THRESHOLDS.normal;
-    const score = stealthWindowScore();
+    let score = stealthWindowScore();
+    // 자동 해제의 오래된 마커는 현재 본문의 분명한 신호를 가리지 않는다.
+    // 사용자가 직접 해제한 마커는 유지한다.
+    if (score < threshold && meta.stealthCooldownReason !== 'manual') {
+        score = stealthWindowDetail({ ignoreCooldown: true }).score;
+    }
     if (score < threshold) return false;
     meta.autoArmed = true;
+    meta.armSource = 'local';
     meta.sfwImmediateHandoff = false;
     saveChatMeta();
     toastr.info(`NSFW 신호 감지 (점수 ${score}) — 연속성 개입을 시작해요.`, '🔞또또NSFW');
@@ -480,12 +488,24 @@ function maybeStealthArm() {
     return true;
 }
 
+function recentReportedHeat() {
+    const recent = (Array.isArray(getContext().chat) ? getContext().chat : [])
+        .filter((message) => message && !message.is_system).slice(-STEALTH_WINDOW);
+    const message = [...recent].reverse().find((entry) => !entry.is_user);
+    if (!message) return null;
+    const state = parseStateFromText(message.mes) ?? snapshotForMessage(message)?.state;
+    return state?.heat ?? null;
+}
+
 // 이미 현재 행동 신호가 사라진 장면은 다음 생성 전에 즉시 해제한다.
 // 과거 신체 묘사만 남은 상태에서 불필요한 마무리 브릿지를 다시 넣지 않는다.
 function maybeStealthRelease() {
     const settings = getSettings();
     const meta = getChatMeta(false);
     if (settings.armMode === 'manual' || !meta?.autoArmed || meta.forceArmed || !stealthColdStreak()) return false;
+    // 은유 때문에 단어 점수가 0이어도 현재 응답의 유효한 높은 온도 보고는 유지한다.
+    // 최근 창 밖의 오래된 상태나 현재 스와이프와 맞지 않는 상태는 쓰지 않는다.
+    if (recentReportedHeat() > AUTO_ARM_OFF) return false;
     const prematureSlowBurnEnd = settings.slowBurnEnabled
         && meta.slowBurnSessionActive
         && !slowBurnProgress(settings).canConclude;
@@ -502,6 +522,7 @@ function maybeStealthRelease() {
     resetSlowBurnSession(meta);
     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
     meta.stealthCooldownFrom = chat.length;
+    meta.stealthCooldownReason = 'scene-ended';
     saveChatMeta();
     toastr.info('현재 성적 행동이 끝난 것을 감지해 또또SFW로 인계해요.', '🔞또또NSFW');
     if (uiReady) updateUi();
@@ -562,7 +583,7 @@ function sanitizeState(raw) {
         ? raw.dialogue_beats
         : Array.isArray(raw.dialogueBeats) ? raw.dialogueBeats : [];
     clean.dialogueBeats = dialogueBeats.map(toBi).filter(hasBi).slice(0, 4);
-    const heat = Number(raw.heat);
+    const heat = raw.heat === null || raw.heat === undefined || String(raw.heat).trim() === '' ? NaN : Number(raw.heat);
     clean.heat = Number.isFinite(heat) ? Math.max(0, Math.min(10, Math.round(heat))) : null;
     const stage = raw.stage === null || raw.stage === undefined ? NaN : Number(raw.stage);
     clean.stage = Number.isFinite(stage) ? Math.max(1, Math.min(6, Math.round(stage))) : null;
@@ -1228,6 +1249,7 @@ const MONITOR_REPORT_LINES = [
     '[Scene Monitor] Write the response normally, then append exactly one machine-readable state line in this format. It is hidden from the reader:',
     '<scene_state>{"_status":"updated","heat":0}</scene_state>',
     ...HEAT_SCALE_LINES,
+    'The example heat value 0 is a format placeholder. Replace it with the actual end-of-response scene heat; never copy 0 unchanged into a sexual scene.',
     'Report "heat" factually. If you need to signal no change, use only the optional top-level "_status":"no_change" inside <scene_state>; otherwise use "updated". Never put a change acknowledgement or any other machine-status text outside the tag.',
 ];
 
@@ -1626,12 +1648,14 @@ function handleIncomingMessage(index) {
         saveChatMeta();
         toastr.success(`“${targetProgress.target}” ${targetProgress.requiredTurns}회 진행을 채웠어요. 다음 AI 답변부터는 전환할 수 있어요.`, '🔞또또NSFW');
     }
-    // 스텔스 모드: 무장 전이면 로컬 감지 시도
-    if (settings.armMode === 'stealth') maybeStealthArm();
+    // 스텔스/온도 자동 모두 본문을 확인한다. 낮은 보고 온도는 본문 신호를 취소할 수 없다.
+    maybeStealthArm();
+    const hasCurrentNsfwSignal = stealthWindowDetail({ ignoreCooldown: true }).score >= STEALTH_THRESHOLDS.normal;
     // 온도 자동 무장/해제 (히스테리시스: 켜짐 5↑, 꺼짐 2↓) — auto·stealth 공통 (해제는 온도 기준)
     if (state?.heat !== null && state?.heat !== undefined && settings.armMode !== 'manual') {
         if (!meta.autoArmed && state.heat >= AUTO_ARM_ON) {
             meta.autoArmed = true;
+            meta.armSource = 'heat';
             meta.sfwImmediateHandoff = false;
             saveChatMeta();
             toastr.info(`장면 온도 ${state.heat}/10 — 연속성 개입을 시작해요.`, '🔞또또NSFW');
@@ -1640,7 +1664,7 @@ function handleIncomingMessage(index) {
                 clearTimeout(refineTimer);
                 refineTimer = setTimeout(() => { void runRefine(); }, 400);
             }
-        } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF) {
+        } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF && !hasCurrentNsfwSignal) {
             const prematureSlowBurnEnd = settings.slowBurnEnabled
                 && meta.slowBurnSessionActive
                 && !slowBurnProgress(settings).canConclude;
@@ -1660,6 +1684,7 @@ function handleIncomingMessage(index) {
                 if (settings.armMode === 'stealth') {
                     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
                     meta.stealthCooldownFrom = chat.length; // 이후 메시지부터 다시 감지
+                    meta.stealthCooldownReason = 'heat';
                 }
                 saveChatMeta();
                 toastr.info(`장면 온도 ${state.heat}/10 — 개입을 해제하고 대기로 돌아가요.`, '🔞또또NSFW');
@@ -1867,6 +1892,7 @@ function renderCardLinkPanel(settings) {
 function renderStatePanel() {
     const { state, source } = effectiveState();
     const settings = getSettings();
+    const armMeta = getChatMeta(false);
     renderSlowBurnPanel(settings);
     renderCardLinkPanel(settings);
     const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
@@ -1875,8 +1901,10 @@ function renderStatePanel() {
     const heatBadge = element('tns-heat');
     if (state?.heat !== null && state?.heat !== undefined) {
         heatBadge.hidden = false;
-        heatBadge.textContent = `🌡️ ${state.heat}/10`;
-        heatBadge.classList.toggle('is-hot', state.heat >= AUTO_ARM_ON);
+        heatBadge.textContent = armMeta?.autoArmed && armMeta.armSource === 'local'
+            ? `🌡️ 보고 ${state.heat}/10 · 본문 감지`
+            : `🌡️ ${state.heat}/10`;
+        heatBadge.classList.toggle('is-hot', Boolean(armMeta?.autoArmed) || state.heat >= AUTO_ARM_ON);
     } else {
         heatBadge.hidden = true;
     }
@@ -2178,7 +2206,9 @@ function updateUi() {
 
         const armed = isSupervising();
         const heat = effectiveState().state?.heat;
-        const heatText = heat !== null && heat !== undefined ? ` (온도 ${heat}/10)` : '';
+        const heatText = meta?.autoArmed && meta.armSource === 'local'
+            ? ' (본문 신호 감지)'
+            : heat !== null && heat !== undefined ? ` (온도 ${heat}/10)` : '';
         element('tns-header-status').textContent = !settings.enabled
             ? '꺼져 있어요'
             : !settings.adultConfirmed
