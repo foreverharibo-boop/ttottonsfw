@@ -4,13 +4,14 @@
   "js": "index.js",
   "css": "style.css",
   "author": "담은",
-  "version": "0.13.6",
+  "version": "0.13.7",
   "auto_update": true,
   "minimum_client_version": "1.12.14",
   "generate_interceptor": "ttottoNsfwGenerationInterceptor",
   "hooks": {
     "enable": "onEnable",
     "disable": "onDisable",
-    "clean": "onClean"
+    "clean": "onClean",
+    "activate": "onActivate"
   }
 }
