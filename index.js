@@ -1,5 +1,6 @@
 // 🔞또또NSFW — NSFW 장면 연속성 추적 + 직전 전개 반복 금지 + 진도 강제
-// 또또(ttotto)의 자매 확장. 정적 import 없이 getContext() 기반으로 동작.
+// 또또(ttotto)의 자매 확장. ST API는 getContext(), 로컬 감지기는 상대 경로 모듈로 사용.
+import { scoreScene } from './scene-detector.js';
 //
 // 동작 개요 (하이브리드):
 //  1) 매 생성마다 프롬프트에 "현재 장면 상태 + 최근 N턴 전개(반복 금지) + 상태 태그 갱신 지시"를 주입
@@ -13,7 +14,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.5';
+const EXTENSION_VERSION = '0.13.6';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -95,17 +96,6 @@ const HEAT_SCALE_LINES = Object.freeze([
     '- 5-6: unmistakable sexual touching/foreplay; this is the active-supervision threshold.',
     '- 7-8: sustained explicit sexual activity or intensifying stimulation; 9: climax is imminent; 10: peak/climax or immediate conclusion.',
 ]);
-const STEALTH_LEXICON = [
-    // 신체 명칭·옷차림·직전 장면의 잔여물은 제외하고, 지금 진행되는 성적 행동만 강한 신호로 본다.
-    { label: '현재 명시적 행위', re: /삽입(?:하|했|해|되|된|되는|중)|박아\s*넣|쑤셔\s*넣|사정(?:하|했|해|시키|하며|하는|하려)|오르가즘(?:에|을)\s*(?:도달|느끼)|성기를\s*(?:넣|밀어\s*넣|움직|빨|핥)|질\s*(?:안|속)에\s*(?:넣|박)|penetrat(?:e|ed|ing)|thrust(?:ed|ing|s)?\s+(?:inside|into|against)|orgasm(?:ed|ing)|came\s+(?:inside|over|on)|coming\s+(?:inside|in\s+her|in\s+him)/gi, w: 4 },
-    // 신음 표기 (3점)
-    { label: '신음 표기', re: /하앙|흐응|아앙|으응|흐읏|하아앙|응아|앗\s*…?\s*안|moan(?:ed|ing|s)?|whimper(?:ed|ing)?/gi, w: 3 },
-    // 중간 신호 (2점): 직접적인 탈의·애무 행동
-    { label: '현재 탈의·애무', re: /(?:옷|속옷|팬티|브래지어|바지|치마)를?\s*(?:벗기|벗겨|내리)|가슴을\s*(?:움켜|주무|빨|핥)|성기를\s*(?:잡|쥐|문지)|lick(?:ed|ing|s)?\s+(?:her|his|their|the)?\s*(?:breasts?|nipples?|clit|pussy|cock|dick)|suck(?:ed|ing|s)?\s+(?:on\s+)?(?:her|his|their|the)?\s*(?:breasts?|nipples?|clit|pussy|cock|dick)|grind(?:ed|ing|s)?\s+(?:against|on|into)|straddl(?:e|ed|ing)\s+(?:her|him|them)/gi, w: 2 },
-    // 약한 신호는 단독으로 무장 기준에 도달하지 않는다.
-    { label: '성적 접촉 분위기', re: /키스가\s*깊어|혀가\s*얽|목덜미에\s*입|귓불을\s*(?:물|빨|핥)|kiss(?:ed|ing)?\s+(?:deeply|hungrily)|tongues?\s+(?:tangled|met)|hands?\s+(?:slid|moved)\s+(?:under|between)/gi, w: 1 },
-];
-
 const DEFAULT_SETTINGS = Object.freeze({
     settingsSchemaVersion: 3,
     enabled: true,
@@ -318,28 +308,7 @@ function isFullyArmed() {
 // ───────────────────────── 스텔스 로컬 감지 ─────────────────────────
 
 function nsfwScoreDetail(text) {
-    const source = String(text ?? '');
-    const hits = [];
-    let score = 0;
-    if (!source) return { score, hits };
-    for (const { label, re, w } of STEALTH_LEXICON) {
-        re.lastIndex = 0;
-        let match;
-        let count = 0;
-        while (count < 3 && (match = re.exec(source)) !== null) {
-            hits.push({ label, text: match[0], w });
-            count++;
-        }
-        score += count * w;
-    }
-    const custom = String(getSettings().stealthKeywords ?? '').split(',').map((k) => k.trim()).filter(Boolean);
-    for (const keyword of custom) {
-        if (source.toLocaleLowerCase().includes(keyword.toLocaleLowerCase())) {
-            score += 3;
-            hits.push({ label: '커스텀', text: keyword, w: 3 });
-        }
-    }
-    return { score, hits };
+    return scoreScene(text, getSettings().stealthKeywords);
 }
 
 function nsfwScore(text) {
@@ -349,7 +318,9 @@ function nsfwScore(text) {
 function stealthWindowDetail() {
     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
     // 해제 직후 직전 장면의 잔열로 곧바로 재무장하는 것 방지: 쿨다운 마커 이후 메시지만 스캔
-    const from = Number(getChatMeta(false)?.stealthCooldownFrom ?? 0);
+    const storedFrom = Number(getChatMeta(false)?.stealthCooldownFrom ?? 0);
+    // 메시지 삭제나 스와이프로 길이가 줄어든 채팅에 남은 마커는 무효화한다.
+    const from = Number.isInteger(storedFrom) && storedFrom >= 0 && storedFrom <= chat.length ? storedFrom : 0;
     const recent = chat
         .map((message, index) => ({ message, index }))
         .filter(({ message, index }) => message && !message.is_system && index >= from)
@@ -1304,10 +1275,33 @@ function clearInjectedPrompt() {
     }
 }
 
+// 일반 전송은 ST 버전에 따라 type이 undefined/빈 문자열로 전달된다.
+function normalizeGenerationType(type) {
+    if (type === undefined || type === null) return 'normal';
+    if (typeof type !== 'string') return 'unknown';
+    return type.trim().toLowerCase() || 'normal';
+}
+
+// SFW가 먼저 실행되더라도 NSFW 감지/해제를 끝낸 뒤 같은 담당 상태를 읽는다.
+// 자체 판단으로 NSFW 설정을 변경하거나 보조 AI를 별도로 호출하지 않는다.
+globalThis.ttottoNsfwSceneBridge = Object.freeze({
+    sync() {
+        const settings = getSettings();
+        const meta = getChatMeta();
+        if (!runtimeActive || !settings.enabled || !settings.adultConfirmed || !meta) return false;
+        if (meta.enabled) {
+            maybeStealthRelease();
+            maybeStealthArm();
+        }
+        return Boolean((meta.enabled && (settings.armMode === 'manual' || meta.autoArmed))
+            || (settings.exitBridge && meta.bridgePending));
+    },
+});
+
 globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGenerationInterceptor(_chat, _contextSize, _abort, type) {
     // 숨은 생성이 시작됐다는 이유만으로 앞서 등록한 상태 지시를 지우지 않는다.
     // quiet에서는 새 주입·상태 변경·브릿지 소모도 하지 않고 기존 등록을 그대로 둔다.
-    const generationType = String(type ?? '').trim().toLocaleLowerCase();
+    const generationType = normalizeGenerationType(type);
     if (generationType === 'quiet') return;
     clearInjectedPrompt();
     try {
