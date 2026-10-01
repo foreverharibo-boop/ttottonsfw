@@ -77,7 +77,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.10';
+const EXTENSION_VERSION = '0.13.11';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -620,9 +620,9 @@ function sanitizeState(raw) {
     for (const [name, info] of Object.entries(characters).slice(0, 64)) {
         if (!name || typeof info !== 'object' || info === null) continue;
         clean.characters[String(name).slice(0, SAFETY_LIMIT)] = {
-            clothing: toBi(info.clothing),
+            clothing: toBi(info.clothing ?? info.appearance),
             position: toBi(info.position),
-            contact: toBi(info.contact),
+            contact: toBi(info.contact ?? info.holding),
         };
     }
     const acts = Array.isArray(raw.acts) ? raw.acts : [];
@@ -657,10 +657,46 @@ function stateCompletenessIssues(state, settings = getSettings()) {
     return issues;
 }
 
-function parseStateFromText(text) {
+// 모델이 JSON 문자열 안에 실제 줄바꿈/탭을 넣은 경우에만 표기를 복구한다.
+// 값·따옴표·키·잘린 구조는 추측해서 변경하지 않는다. 정상 JSON은 그대로 파싱한다.
+function parseStateJson(text) {
+    const source = String(text ?? '');
+    try {
+        return JSON.parse(source);
+    } catch (originalError) {
+        let inString = false;
+        let escaped = false;
+        let repaired = '';
+        let changed = false;
+        for (const char of source) {
+            const code = char.charCodeAt(0);
+            if (inString && code < 0x20) {
+                // 직전의 역슬래시는 이미 출력했으므로 겹치지 않게 한다.
+                repaired += (escaped ? '' : '\\') + `u${code.toString(16).padStart(4, '0')}`;
+                escaped = false;
+                changed = true;
+                continue;
+            }
+            repaired += char;
+            if (!inString) {
+                if (char === '"') inString = true;
+            } else if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+        }
+        if (!changed) throw originalError;
+        return JSON.parse(repaired);
+    }
+}
+
+function parseStateFromText(text, regex = STATE_TAG_REGEX) {
     const source = String(text ?? '');
     let lastJson = null;
-    for (const match of source.matchAll(STATE_TAG_REGEX)) {
+    for (const match of source.matchAll(regex)) {
         lastJson = match[1];
     }
     if (!lastJson) return null;
@@ -668,7 +704,7 @@ function parseStateFromText(text) {
     const end = lastJson.lastIndexOf('}');
     if (start < 0 || end <= start) return null;
     try {
-        return sanitizeState(JSON.parse(lastJson.slice(start, end + 1)));
+        return sanitizeState(parseStateJson(lastJson.slice(start, end + 1)));
     } catch {
         return null;
     }
@@ -689,6 +725,55 @@ function stripStateTag(text) {
         .replace(/\n{3,}$/g, '\n')
         .replace(/[ \t]+$/g, '')
         .trimEnd();
+}
+
+// 현재 답변의 다른 확장 형식만 호환한다. 과거 SFW 스냅샷은 가져오지 않는다.
+function parseCompatibleSfwState(text) {
+    const state = parseStateFromText(text, /<sfw_scene\b[^>]*>([\s\S]*?)<\/sfw_scene>/gi);
+    if (!state) return null;
+    // SFW 서사 강도/단계는 NSFW 온도/단계와 의미가 다르다.
+    state.heat = null;
+    state.stage = null;
+    return state;
+}
+
+function stripCompatibleSfwTag(text) {
+    return String(text ?? '')
+        .replace(/<sfw_scene\b[^>]*>[\s\S]*?<\/sfw_scene>/gi, '')
+        .replace(/<sfw_scene\b[^>]*>[\s\S]*$/gi, '')
+        .trimEnd();
+}
+
+function recordBody(text) {
+    return stripCompatibleSfwTag(stripStateTag(text));
+}
+
+function messageStateSignature(message) {
+    const text = recordBody(message?.mes);
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return `${currentSwipeIndex(message)}:${text.length}:${(hash >>> 0).toString(36)}`;
+}
+
+function mergeCurrentReports(primary, compatible) {
+    if (!primary) return compatible;
+    if (!compatible) return primary;
+    const merged = structuredClone(primary);
+    if (!hasBi(merged.location)) merged.location = compatible.location;
+    for (const [name, fields] of Object.entries(compatible.characters)) {
+        if (!merged.characters[name]) merged.characters[name] = fields;
+        else for (const field of ['clothing', 'position', 'contact']) {
+            if (!hasBi(merged.characters[name][field])) merged.characters[name][field] = fields[field];
+        }
+    }
+    for (const field of ['acts', 'dialogueBeats', 'next']) {
+        if (!merged[field]?.length) merged[field] = compatible[field];
+    }
+    merged.dialogueReported ||= compatible.dialogueReported;
+    return merged;
 }
 
 function getMessageStore(message, create = true) {
@@ -723,19 +808,26 @@ function harvestMessage(message) {
     let changed = false;
     let found = false;
 
-    const state = parseStateFromText(message.mes);
+    const direct = parseStateFromText(message.mes);
+    const compatible = isFullyArmed() ? parseCompatibleSfwState(message.mes) : null;
+    const signature = messageStateSignature(message);
+    const previous = snapshotForMessage(message);
+    // 두 수신 훅 순서가 바뀌어도 같은 답변의 직접 보고를 우선한다.
+    const primary = direct ?? (previous?.messageSignature === signature ? previous.state : null);
+    const state = compatible ? mergeCurrentReports(primary, compatible) : direct;
     if (state) {
         const store = getMessageStore(message);
-        store.swipes[String(swipeIndex)] = { state, at: Date.now() };
+        store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature };
         found = true;
     }
-    const strippedMes = stripStateTag(message.mes);
+    const clean = (text) => isFullyArmed() ? recordBody(text) : stripStateTag(text);
+    const strippedMes = clean(message.mes);
     if (strippedMes !== message.mes) {
         message.mes = strippedMes;
         changed = true;
     }
     if (Array.isArray(message.swipes) && typeof message.swipes[swipeIndex] === 'string') {
-        const strippedSwipe = stripStateTag(message.swipes[swipeIndex]);
+        const strippedSwipe = clean(message.swipes[swipeIndex]);
         if (strippedSwipe !== message.swipes[swipeIndex]) {
             message.swipes[swipeIndex] = strippedSwipe;
             changed = true;
@@ -1425,6 +1517,11 @@ function normalizeGenerationType(type) {
 // 자체 판단으로 NSFW 설정을 변경하거나 보조 AI를 별도로 호출하지 않는다.
 globalThis.ttottoNsfwSceneBridge = Object.freeze({
     beginGeneration(type) { beginSceneGeneration(type); },
+    collect(message) {
+        const index = getContext().chat?.indexOf(message) ?? -1;
+        if (index < 0 || !runtimeActive || !isFullyArmed()) return;
+        handleIncomingMessage(index);
+    },
     sync() {
         const settings = getSettings();
         const meta = getChatMeta();
@@ -1626,7 +1723,7 @@ let queuedRefineTarget = null;
 function captureRefineTarget() {
     const context = getContext();
     const message = assistantMessages().at(-1);
-    return message ? { metadata: context.chatMetadata, message, swipe: currentSwipeIndex(message), text: stripStateTag(message.mes) } : null;
+    return message ? { metadata: context.chatMetadata, message, swipe: currentSwipeIndex(message), text: recordBody(message.mes) } : null;
 }
 
 async function runRefine({ manual = false } = {}) {
@@ -1651,7 +1748,7 @@ async function runRefine({ manual = false } = {}) {
     const context = getContext();
     const target = assistantMessages().at(-1);
     const targetSwipe = currentSwipeIndex(target);
-    const targetText = stripStateTag(target.mes);
+    const targetText = recordBody(target.mes);
     const metadata = context.chatMetadata;
     refineAbortController?.abort();
     refineAbortController = new AbortController();
@@ -1662,14 +1759,14 @@ async function runRefine({ manual = false } = {}) {
         // 보정 호출 중 스와이프/채팅/본문이 바뀌면 이전 장면을 새 답변에 덮어쓰지 않는다.
         if (getContext().chatMetadata !== metadata || !getContext().chat?.includes(target)
             || assistantMessages().at(-1) !== target
-            || currentSwipeIndex(target) !== targetSwipe || stripStateTag(target.mes) !== targetText) return false;
+            || currentSwipeIndex(target) !== targetSwipe || recordBody(target.mes) !== targetText) return false;
         const state = parseRefineResponse(response);
         const meta = getChatMeta();
         const refinedAt = Date.now();
         // 보정 결과를 최신 AI 메시지의 현재 스와이프에도 붙여야 반복 목록과 슬로우번 체류 턴이 정상 계산된다.
         if (target) {
             const store = getMessageStore(target);
-            store.swipes[String(targetSwipe)] = { state, at: refinedAt };
+            store.swipes[String(targetSwipe)] = { state, at: refinedAt, messageSignature: messageStateSignature(target) };
             persistChat();
         }
         meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
@@ -1744,6 +1841,8 @@ function handleIncomingMessage(index) {
     if (isPendingAssistant(message) || holdsRewriteGeneration()) return;
     lastCompletedAssistant = { metadata: getContext().chatMetadata, message };
 
+    // 첫 감지 답변도 올바른 담당으로 수집한다. 본문을 지우기 전에 판단한다.
+    maybeStealthArm();
     const { changed, found, state } = harvestMessage(message);
     if (found) {
         if (!stateCompletenessIssues(state ?? snapshotForMessage(message)?.state, settings).length) refineFailure = null;
