@@ -77,7 +77,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.8';
+const EXTENSION_VERSION = '0.13.10';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -408,7 +408,56 @@ function stealthColdStreak(k = STEALTH_COLD_STREAK) {
     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
     const recent = chat.filter((message) => message && !message.is_system).slice(-k);
     if (recent.length < k) return false;
+    if (recent.some(isPendingAssistant)) return false;
     return recent.every((message) => nsfwScore(stripStateTag(message.mes)) === 0);
+}
+
+// 새 스와이프의 빈 자리/생성 표시를 완성된 일상 답변으로 해석하지 않는다.
+function isPendingAssistant(message) {
+    return message && !message.is_user && !message.is_system
+        && /^(?:\s|\.{3}|…)*$/.test(String(message.mes ?? ''));
+}
+
+let rewriteGeneration = null;
+let generationEvents = [];
+let lastCompletedAssistant = null;
+
+function beginSceneGeneration(type, fromEvent = false, dryRun = false) {
+    if (dryRun) return;
+    const normalized = normalizeGenerationType(type);
+    if (fromEvent) generationEvents.push(normalized);
+    if (!ALLOWED_GENERATION_TYPES.has(normalized)) return;
+    if (normalized !== 'swipe' && normalized !== 'regenerate') {
+        rewriteGeneration = null;
+        return;
+    }
+    // 생성 시작 시 담당만 보존한다. 이전 스와이프의 인물/행위 상태는 복사하지 않는다.
+    const context = getContext();
+    const removedReply = normalized === 'regenerate' && lastCompletedAssistant
+        && lastCompletedAssistant.metadata === context.chatMetadata
+        && !context.chat?.includes(lastCompletedAssistant.message);
+    if (!holdsRewriteGeneration() && !removedReply) maybeStealthRelease();
+    if (isFullyArmed()) rewriteGeneration = { metadata: context.chatMetadata };
+}
+
+function holdsRewriteGeneration() {
+    return Boolean(rewriteGeneration
+        && rewriteGeneration.metadata === getContext().chatMetadata && isFullyArmed());
+}
+
+function finishSceneGeneration(type) {
+    const normalized = typeof type === 'string' ? normalizeGenerationType(type) : generationEvents.at(-1);
+    const index = generationEvents.lastIndexOf(normalized);
+    if (index >= 0) generationEvents.splice(index, 1);
+    // 중첩된 보조 분석의 완료는 본 스와이프 생성의 담당을 풀지 않는다.
+    if (normalized === 'quiet') return false;
+    rewriteGeneration = null;
+    return true;
+}
+
+function finishReceivedGeneration() {
+    rewriteGeneration = null;
+    generationEvents = generationEvents.filter((type) => type === 'quiet');
 }
 
 // 원탭 강제 무장/해제 — 스텔스 감지가 놓쳤을 때(은유적 장면 등)의 수동 오버라이드
@@ -481,8 +530,7 @@ function maybeStealthArm() {
     saveChatMeta();
     toastr.info(`NSFW 신호 감지 (점수 ${score}) — 연속성 개입을 시작해요.`, '🔞또또NSFW');
     if (settings.autoRefine) {
-        clearTimeout(refineTimer);
-        refineTimer = setTimeout(() => { void runRefine(); }, 400);
+        scheduleAutoRefine();
     }
     updateUi();
     return true;
@@ -502,7 +550,7 @@ function recentReportedHeat() {
 function maybeStealthRelease() {
     const settings = getSettings();
     const meta = getChatMeta(false);
-    if (settings.armMode === 'manual' || !meta?.autoArmed || meta.forceArmed || !stealthColdStreak()) return false;
+    if (settings.armMode === 'manual' || !meta?.autoArmed || meta.forceArmed || holdsRewriteGeneration() || !stealthColdStreak()) return false;
     // 은유 때문에 단어 점수가 0이어도 현재 응답의 유효한 높은 온도 보고는 유지한다.
     // 최근 창 밖의 오래된 상태나 현재 스와이프와 맞지 않는 상태는 쓰지 않는다.
     if (recentReportedHeat() > AUTO_ARM_OFF) return false;
@@ -1232,6 +1280,10 @@ const SLOW_BURN_STATE_REPORT_LINES = [
 
 function stateReportLines(slowBurnEnabled, dialogueGuard, nextGuidance = '') {
     const lines = [...(slowBurnEnabled ? SLOW_BURN_STATE_REPORT_LINES : STATE_REPORT_LINES)];
+    lines.push(
+        'This is a FULL STATE REPORT, not the temperature-only monitor. Always report location, every present character\'s clothing/position/contact, new acts, actual heat, and next beats. A heat-only object is incomplete.',
+        'The example heat value 0 is a format placeholder. Calculate heat from the actual END of the response; do not copy the example value. If prior recorded fields are missing, reconstruct them from the latest roleplay prose without inventing facts.',
+    );
     if (nextGuidance) lines.push(nextGuidance);
     if (!dialogueGuard) return lines;
     lines[1] = lines[1].replace(
@@ -1273,14 +1325,15 @@ function buildInjection() {
 
     const sections = ['[Scene Continuity Directive]'];
 
-    if (state) {
+    const stateLines = state ? buildStateLines(state) : [];
+    if (stateLines.length) {
         sections.push(
             'CURRENT SCENE STATE (established facts — never contradict them):',
-            ...buildStateLines(state),
+            ...stateLines,
             'Clothing that has been removed stays removed. Positions, locations, and contact only change through explicit on-page actions in your response. Never silently reset or teleport anything.',
         );
     } else {
-        sections.push('No scene state has been recorded yet. Establish it in your response and report it in the state block below.');
+        sections.push('No location/character state has been recorded yet. Derive the current state from the latest roleplay prose, preserve those established facts, and report the complete state in the block below. A temperature-only record is not a full scene state.');
     }
 
     const customBans = (getChatMeta(false)?.customBans ?? []).filter(Boolean);
@@ -1371,6 +1424,7 @@ function normalizeGenerationType(type) {
 // SFW가 먼저 실행되더라도 NSFW 감지/해제를 끝낸 뒤 같은 담당 상태를 읽는다.
 // 자체 판단으로 NSFW 설정을 변경하거나 보조 AI를 별도로 호출하지 않는다.
 globalThis.ttottoNsfwSceneBridge = Object.freeze({
+    beginGeneration(type) { beginSceneGeneration(type); },
     sync() {
         const settings = getSettings();
         const meta = getChatMeta();
@@ -1389,9 +1443,16 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
     // quiet에서는 새 주입·상태 변경·브릿지 소모도 하지 않고 기존 등록을 그대로 둔다.
     const generationType = normalizeGenerationType(type);
     if (generationType === 'quiet') return;
+    prepareSceneInjection({ generationType });
+};
+
+// 생성 시작 시 등록하고 인터셉터에서 최신 유저 입력으로 다시 확인한다.
+// 미리 준비한 해제 브릿지는 실제 인터셉터 호출 때만 소모한다.
+function prepareSceneInjection({ generationType, consumeBridge = true } = {}) {
     clearInjectedPrompt();
     try {
         if (!ALLOWED_GENERATION_TYPES.has(generationType)) return;
+        beginSceneGeneration(generationType);
         const settings = getSettings();
         const meta = getChatMeta();
         // 채팅 토글로 수동 해제한 뒤에는 감시 자체가 꺼져도 다음 생성 한 번의 브릿지만 통과시킨다.
@@ -1406,8 +1467,10 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
         if (bridgeOnly) {
             const prompt = BRIDGE_LINES.join('\n');
             getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
-            meta.bridgePending = false;
-            saveChatMeta();
+            if (consumeBridge) {
+                meta.bridgePending = false;
+                saveChatMeta();
+            }
             console.debug(`${LOG_PREFIX} 수동 해제 브릿지 주입 (${prompt.length}자)`);
             return;
         }
@@ -1419,7 +1482,7 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
         if (!prompt) return;
         getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
         // 해제 브릿지는 딱 한 번만: 이번 생성에 실렸으면 플래그를 끈다 (미리보기는 소모하지 않음)
-        if (meta?.bridgePending && !isFullyArmed()) {
+        if (consumeBridge && meta?.bridgePending && !isFullyArmed()) {
             meta.bridgePending = false;
             saveChatMeta();
         }
@@ -1428,7 +1491,18 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
         clearInjectedPrompt();
         console.error(`${LOG_PREFIX} 생성 전 주입 실패 — 본 채팅 생성은 계속합니다.`, error);
     }
-};
+}
+
+function onGenerationStarted(type, _options, dryRun) {
+    if (dryRun) return;
+    beginSceneGeneration(type, true);
+    const generationType = normalizeGenerationType(type);
+    if (ALLOWED_GENERATION_TYPES.has(generationType)) {
+        prepareSceneInjection({ generationType, consumeBridge: false });
+    } else if (generationType === 'impersonate') {
+        clearInjectedPrompt();
+    }
+}
 
 // ───────────────────────── 보조 AI 보정 (하이브리드 폴백) ─────────────────────────
 
@@ -1541,12 +1615,28 @@ function parseRefineResponse(text) {
     if (start < 0 || end <= start) throw new Error('보정 분석 응답에 JSON 객체가 없습니다.');
     const state = sanitizeState(JSON.parse(clean.slice(start, end + 1)));
     if (!state) throw new Error('보정 분석 결과가 비어 있습니다.');
+    const missing = stateCompletenessIssues(state);
+    if (missing.length) throw new Error(`보정 분석 결과에 필수 상태가 없습니다: ${missing.join(', ')}`);
     return state;
+}
+
+let refineFailure = null;
+let queuedRefineTarget = null;
+
+function captureRefineTarget() {
+    const context = getContext();
+    const message = assistantMessages().at(-1);
+    return message ? { metadata: context.chatMetadata, message, swipe: currentSwipeIndex(message), text: stripStateTag(message.mes) } : null;
 }
 
 async function runRefine({ manual = false } = {}) {
     const settings = getSettings();
-    if (!runtimeActive || refineRunning) return false;
+    if (!runtimeActive) return false;
+    if (!manual && generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) return false;
+    if (refineRunning) {
+        if (!manual) queuedRefineTarget = captureRefineTarget();
+        return false;
+    }
     if (!settings.adultConfirmed) {
         if (manual) toastr.warning('설정에서 성인 캐릭터 확인에 먼저 체크해주세요.', '🔞또또NSFW');
         return false;
@@ -1557,20 +1647,29 @@ async function runRefine({ manual = false } = {}) {
     }
 
     refineRunning = true;
+    refineFailure = null;
+    const context = getContext();
+    const target = assistantMessages().at(-1);
+    const targetSwipe = currentSwipeIndex(target);
+    const targetText = stripStateTag(target.mes);
+    const metadata = context.chatMetadata;
     refineAbortController?.abort();
     refineAbortController = new AbortController();
     updateUi();
 
     try {
         const response = await requestRefine(refineAbortController.signal);
+        // 보정 호출 중 스와이프/채팅/본문이 바뀌면 이전 장면을 새 답변에 덮어쓰지 않는다.
+        if (getContext().chatMetadata !== metadata || !getContext().chat?.includes(target)
+            || assistantMessages().at(-1) !== target
+            || currentSwipeIndex(target) !== targetSwipe || stripStateTag(target.mes) !== targetText) return false;
         const state = parseRefineResponse(response);
         const meta = getChatMeta();
         const refinedAt = Date.now();
         // 보정 결과를 최신 AI 메시지의 현재 스와이프에도 붙여야 반복 목록과 슬로우번 체류 턴이 정상 계산된다.
-        const latestMessage = assistantMessages().at(-1);
-        if (latestMessage) {
-            const store = getMessageStore(latestMessage);
-            store.swipes[String(currentSwipeIndex(latestMessage))] = { state, at: refinedAt };
+        if (target) {
+            const store = getMessageStore(target);
+            store.swipes[String(targetSwipe)] = { state, at: refinedAt };
             persistChat();
         }
         meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
@@ -1579,12 +1678,17 @@ async function runRefine({ manual = false } = {}) {
         return true;
     } catch (error) {
         if (error?.name === 'AbortError') return false;
+        refineFailure = { metadata, message: String(error?.message ?? error).slice(0, 180) };
         console.error(`${LOG_PREFIX} 보정 분석 실패`, error);
         if (manual) toastr.error(`보정 분석 실패: ${error?.message ?? error}`, '🔞또또NSFW');
         return false;
     } finally {
         refineRunning = false;
         refineAbortController = null;
+        const queued = queuedRefineTarget;
+        queuedRefineTarget = null;
+        if (queued?.metadata === getContext().chatMetadata
+            && (queued.message !== target || queued.swipe !== targetSwipe || queued.text !== targetText)) scheduleAutoRefine();
         if (runtimeActive) updateUi();
     }
 }
@@ -1593,6 +1697,10 @@ function scheduleAutoRefine() {
     const settings = getSettings();
     // 무장 상태에서만 자동 보정 — 대기(스텔스/감시) 중 태그가 없는 건 정상이므로 호출 낭비 금지
     if (!settings.autoRefine || !isFullyArmed()) return;
+    // 생성 시작 감지가 스트리밍 중의 미완성 답변 분석을 예약하지 않도록 한다.
+    // 완성 메시지/생성 종료 이벤트에서 필요한 경우 다시 예약한다.
+    if (generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) return;
+    if (!stateCompletenessIssues(snapshotForMessage(assistantMessages().at(-1))?.state, settings).length) return;
     clearTimeout(refineTimer);
     refineTimer = setTimeout(() => { void runRefine(); }, 900);
 }
@@ -1633,9 +1741,12 @@ function handleIncomingMessage(index) {
 
     const message = messageByIndex(index);
     if (!message || message.is_user || message.is_system) return;
+    if (isPendingAssistant(message) || holdsRewriteGeneration()) return;
+    lastCompletedAssistant = { metadata: getContext().chatMetadata, message };
 
     const { changed, found, state } = harvestMessage(message);
     if (found) {
+        if (!stateCompletenessIssues(state ?? snapshotForMessage(message)?.state, settings).length) refineFailure = null;
         // 새 스냅샷이 수동 보정보다 최신이므로 수동 보정은 자연히 밀려남
         if (meta.manualState && Number(meta.manualState.at ?? 0) < Date.now()) meta.manualState = null;
         saveChatMeta();
@@ -1678,8 +1789,9 @@ function handleIncomingMessage(index) {
             } else {
                 meta.autoArmed = false;
                 meta.forceArmed = false;
-                meta.bridgePending = Boolean(settings.exitBridge); // 다음 생성 한 번은 장면 마무리 지시
-                meta.sfwImmediateHandoff = false;
+                const sceneEnded = stealthColdStreak();
+                meta.bridgePending = Boolean(settings.exitBridge && !sceneEnded);
+                meta.sfwImmediateHandoff = sceneEnded;
                 resetSlowBurnSession(meta);
                 if (settings.armMode === 'stealth') {
                     const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
@@ -1896,7 +2008,11 @@ function renderStatePanel() {
     renderSlowBurnPanel(settings);
     renderCardLinkPanel(settings);
     const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
-    element('tns-state-source').textContent = refineRunning ? '보조 AI 분석 중…' : sourceLabel;
+    const incomplete = isFullyArmed() && stateCompletenessIssues(state, settings).length > 0;
+    element('tns-state-source').textContent = refineRunning ? '보조 AI 분석 중…'
+        : refineFailure?.metadata === getContext().chatMetadata ? `상태 보정 실패: ${refineFailure.message}`
+        : incomplete ? `전체 장면 기록 미완성 · ${settings.autoRefine ? '자동 보정 사용 중' : '자동 보정 꺼짐'}`
+        : sourceLabel;
 
     const heatBadge = element('tns-heat');
     if (state?.heat !== null && state?.heat !== undefined) {
@@ -2685,13 +2801,30 @@ function registerEvents() {
         registeredEventHandlers.push({ event, handler });
     };
 
-    listen('MESSAGE_RECEIVED', (index) => handleIncomingMessage(index));
+    listen('GENERATION_STARTED', onGenerationStarted);
+    listen('MESSAGE_RECEIVED', (index) => {
+        finishReceivedGeneration();
+        handleIncomingMessage(index);
+    });
     // 스와이프 보험: ST 버전에 따라 스와이프 생성 후 MESSAGE_RECEIVED가 안 오는 경우를 이중으로 잡는다
-    listen('GENERATION_ENDED', () => handleIncomingMessage());
+    listen('GENERATION_ENDED', (type) => {
+        if (finishSceneGeneration(type)) handleIncomingMessage();
+    });
+    listen('GENERATION_STOPPED', () => {
+        rewriteGeneration = null;
+        generationEvents = [];
+        handleIncomingMessage();
+    });
+    listen('CHARACTER_MESSAGE_RENDERED', (index) => handleIncomingMessage(index));
     listen('MESSAGE_SWIPED', (index) => handleIncomingMessage(index));
     listen('MESSAGE_EDITED', () => updateUi());
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
+        queuedRefineTarget = null;
+        refineFailure = null;
+        rewriteGeneration = null;
+        generationEvents = [];
+        lastCompletedAssistant = null;
         clearTimeout(refineTimer);
         refineAbortController?.abort();
         clearInjectedPrompt();
@@ -2757,6 +2890,11 @@ export function onEnable() {
 
 export function onDisable() {
     runtimeActive = false;
+    queuedRefineTarget = null;
+    refineFailure = null;
+    rewriteGeneration = null;
+    generationEvents = [];
+    lastCompletedAssistant = null;
     clearTimeout(refineTimer);
     refineAbortController?.abort();
     closePopup();
