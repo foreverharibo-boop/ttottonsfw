@@ -25,8 +25,6 @@ const ordinary = [
     'He did not lick her nipples.',
     '그는 그녀의 유두를 핥지 않았다.',
     '그녀는 옷을 벗겨 갈아입었다. 바지를 내리고 팬티를 내렸다.',
-    'She kissed deeply. Their tongues met. She moaned. She whimpered.',
-    '하앙. 흐응. 아앙.',
     'She explained what an orgasm was.',
 ];
 for (const text of ordinary) test(`ordinary/denied: ${text}`, () => {
@@ -66,8 +64,8 @@ test('custom keywords do not turn washing anatomy into sex', () => {
     assert.equal(scoreScene('She washed her breasts with soap.', 'breasts,soap').score, 0);
     assert.equal(scoreScene('Their private signal was velvet.', 'velvet').score, 3);
 });
-test('weak cues in another paragraph do not increase an earlier act', () => {
-    assert.equal(scoreScene('He licked her nipples.\n\nShe whimpered in pain. She moaned.').score, 4);
+test('nonsexual pain is excluded but other vocal signals keep their original score', () => {
+    assert.equal(scoreScene('He licked her nipples.\n\nShe whimpered in pain. She moaned.').score, 7);
 });
 
 function runtime({mode='stealth', sensitivity='normal', armed=false, force=false, autoRefine=false, chat=[]}={}) {
@@ -169,7 +167,7 @@ test('unrelated ordinary scenes still honor two-message cold streak',()=>{
 test('thresholds, UI, version and heat instructions agree',()=>{
     assert.match(index,/high: 3, normal: 4, low: 7/);
     assert.match(index,/Ordinary bathing, showering/);
-    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.14');
+    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.15');
     assert.match(fs.readFileSync(new URL('settings.html',root),'utf8'),/민감 3점 · 보통 4점 · 둔감 7점/);
 });
 
@@ -207,4 +205,48 @@ test('module and actual runtime detector are identical',()=>{
 });
 test('later intentional custom keyword is not hidden by an earlier washing mention',()=>{
     assert.equal(scoreScene('She washed the velvet with soap. Their private signal was velvet.', 'velvet').score,3);
+});
+
+test('kissing plus moaning reaches the default threshold without explicit acts',()=>{
+    const text='She kissed deeply. She moaned.';
+    assert.equal(scoreScene(text).score,4);
+    assert.deepEqual(plain(inline(text)),scoreScene(text));
+    const r=runtime({chat:[message(text)]});
+    assert.equal(r.api.maybeStealthArm(),true);
+});
+test('romantic signals accumulate across the two-message window',()=>{
+    const r=runtime({chat:[message('She kissed deeply.'),message('She moaned.',true)]});
+    assert.equal(r.api.stealthWindowDetail().score,4);
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),true);
+});
+test('repeated Korean vocal signals retain their former scores',()=>{
+    assert.equal(scoreScene('하앙. 흐응. 아앙.').score,9);
+});
+test('unclothing without a washing/changing context retains its former score',()=>{
+    assert.equal(scoreScene('그는 바지를 내렸다. 옷을 벗겨 내렸다.').score,2);
+});
+
+test('changing clothes does not turn nearby undressing into sex',()=>{
+    assert.equal(scoreScene('She changed her clothes. She moaned while removing a tight shirt.').score,0);
+    assert.equal(scoreScene('She changed her clothes.').routineOnly,true);
+});
+test('changing a decision is not a nonsexual-care filter',()=>{
+    assert.equal(scoreScene('She changed her mind and kissed deeply. She moaned.').score,4);
+});
+
+test('kissing plus moaning in a bath remains eligible',()=>{
+    for(const text of ['She showered. She kissed him deeply. She moaned.', '목욕 중이었다. 키스가 깊어졌다. 하앙.']) {
+        assert.equal(scoreScene(text).score,4);
+        assert.equal(scoreScene(text).routineOnly,false);
+        assert.deepEqual(plain(inline(text)),scoreScene(text));
+        const r=runtime({chat:[message(text)]});
+        assert.equal(r.api.maybeStealthArm(),true);
+    }
+});
+test('washing plus vocal sounds without intimacy remains excluded',()=>{
+    assert.equal(scoreScene('She showered. She moaned under the warm water.').score,0);
+    assert.equal(scoreScene('샤워 중이었다. 흐응. 하앙.').score,0);
+});
+test('denied kissing does not legitimize ordinary bath sounds',()=>{
+    assert.equal(scoreScene('She showered. She did not kiss him deeply. She moaned under warm water.').score,0);
 });
