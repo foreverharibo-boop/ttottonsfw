@@ -158,7 +158,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.21';
+const EXTENSION_VERSION = '0.13.22';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -522,6 +522,8 @@ function diagnosticState() {
     return { enabled: Boolean(settings.enabled), chatEnabled: Boolean(meta.enabled), adultConfirmed: Boolean(settings.adultConfirmed),
         autoRefine: Boolean(settings.autoRefine), modeAuto: settings.armMode === 'auto', modeStealth: settings.armMode === 'stealth', modeManual: settings.armMode === 'manual',
         autoArmed: Boolean(meta.autoArmed), armedByHeat: Boolean(meta.autoArmed && meta.armSource === 'heat'), armedLocally: Boolean(meta.autoArmed && meta.armSource === 'local'), forceArmed: Boolean(meta.forceArmed), bridgePending: Boolean(meta.bridgePending),
+        slowBurnEnabled: Boolean(settings.slowBurnEnabled), slowBurnSessionActive: Boolean(meta.slowBurnSessionActive),
+        slowBurnLocked: Boolean(meta.slowBurnLocked), slowBurnRecoveryPending: Boolean(meta.slowBurnRecoveryPending),
         currentHeatPresent: heat !== null && heat !== undefined,
         ...(heat !== null && heat !== undefined ? { currentHeat: heat } : {}),
         latestReportMissing: current.source === 'missing-report', latestBodyChanged: current.source === 'body-changed',
@@ -2209,6 +2211,7 @@ globalThis.ttottoNsfwSceneBridge = Object.freeze({
                 try { handleIncomingMessage(getContext().chat.indexOf(message)); }
                 finally { sceneBridgeSyncing = false; }
             }
+            reconcileReportedRelease();
             maybeStealthRelease();
             maybeStealthArm();
         }
@@ -2231,6 +2234,7 @@ function prepareSceneInjection({ generationType, consumeBridge = true } = {}) {
     clearInjectedPrompt();
     try {
         if (!ALLOWED_GENERATION_TYPES.has(generationType)) { diagnosticRecord('injection_skipped', { reason: 'generation_type' }); return; }
+        reconcileReportedRelease();
         beginSceneGeneration(generationType);
         const settings = getSettings();
         const meta = getChatMeta();
@@ -2277,6 +2281,7 @@ function prepareSceneInjection({ generationType, consumeBridge = true } = {}) {
 function onGenerationStarted(type, _options, dryRun) {
     if (dryRun) return;
     diagnosticRecord('generation_started', { reason: normalizeGenerationType(type), ...diagnosticState() });
+    if (ALLOWED_GENERATION_TYPES.has(normalizeGenerationType(type))) reconcileReportedRelease();
     beginSceneGeneration(type, true);
     const generationType = normalizeGenerationType(type);
     if (ALLOWED_GENERATION_TYPES.has(generationType)) {
@@ -2569,6 +2574,19 @@ function persistChat() {
     }
 }
 
+// Repair an already-stored low-temperature state after reload/update. Only the
+// latest selected, body-matching report can release ownership; never replay an
+// old high report to activate the extension or interrupt an in-flight reply.
+function reconcileReportedRelease() {
+    const settings = getSettings();
+    const meta = getChatMeta(false);
+    if (settings.armMode !== 'auto' || !meta?.autoArmed || meta.forceArmed
+        || holdsRewriteGeneration() || generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) return;
+    const state = effectiveState().state;
+    if (state?.heat == null || state.heat > AUTO_ARM_OFF) return;
+    applyReportedHeat(state, assistantMessages().at(-1));
+}
+
 // Apply the same temperature decision to collected and repaired reports.
 function applyReportedHeat(state, message) {
     if (!isSupervising()) { diagnosticRecord('heat_decision', { reason: 'not_supervising' }); return; }
@@ -2577,7 +2595,7 @@ function applyReportedHeat(state, message) {
     const meta = getChatMeta(false);
     const hasCurrentNsfwSignal = settings.armMode === 'stealth'
         && stealthWindowDetail({ ignoreCooldown: true }).score >= STEALTH_THRESHOLDS.normal;
-    // 온도 무장/해제 (히스테리시스: 켜짐 6↑, 꺼짐 2↓). 수동/슬로우번 제어는 유지.
+    // 온도 자동의 낮은 보고는 슬로우번 진행도보다 우선한다. 수동 모드는 유지.
     if (state?.heat !== null && state?.heat !== undefined && settings.armMode !== 'manual') {
         if (!meta.autoArmed && state.heat >= AUTO_ARM_ON
             && !nsfwScoreDetail(stripStateTag(message.mes)).routineOnly) {
@@ -2589,7 +2607,7 @@ function applyReportedHeat(state, message) {
             // 감시 모드에서는 온도만 수집했으므로, 무장 직후 보조 AI로 전체 상태를 백필
             if (settings.autoRefine) scheduleAutoRefine();
         } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF && !hasCurrentNsfwSignal) {
-            const prematureSlowBurnEnd = settings.slowBurnEnabled
+            const prematureSlowBurnEnd = settings.armMode !== 'auto' && settings.slowBurnEnabled
                 && meta.slowBurnSessionActive
                 && !slowBurnProgress(settings).canConclude;
             if (prematureSlowBurnEnd) {
@@ -2602,7 +2620,9 @@ function applyReportedHeat(state, message) {
             } else {
                 meta.autoArmed = false;
                 meta.forceArmed = false;
-                const sceneEnded = stealthColdStreak();
+                // Temperature mode must not keep SFW suspended for another
+                // reply because historical wording still has a local score.
+                const sceneEnded = settings.armMode === 'auto' || stealthColdStreak();
                 meta.bridgePending = Boolean(settings.exitBridge && !sceneEnded);
                 meta.sfwImmediateHandoff = sceneEnded;
                 resetSlowBurnSession(meta);
@@ -3731,6 +3751,7 @@ function registerEvents() {
         refineAbortController?.abort();
         clearInjectedPrompt();
         populateProfiles();
+        reconcileReportedRelease();
         maybeStealthRelease();
         updateUi();
     });
@@ -3754,6 +3775,7 @@ async function initialize() {
     if (initializationPromise) return initializationPromise;
     initializationPromise = (async () => {
         getSettings();
+        reconcileReportedRelease();
         maybeStealthRelease();
         registerEvents();
         await initializeUi();

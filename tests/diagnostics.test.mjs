@@ -309,3 +309,34 @@ for (const order of ['nsfw-first', 'sfw-first']) test(`both diagnostic fetch obs
     assert.equal(r.calls.length, 2);
     assert.ok((await r.response.text()).includes('PRIVATE BODY') === false);
 });
+
+for (const order of ['nsfw-first', 'sfw-first']) for (const heat of [0, 1, 2]) {
+    test(`unfinished pacing returns this reply to SFW: ${order}, heat ${heat}`, { skip: !pairedSfwSource }, () => {
+        const r = runtime();
+        const report = { location: 'Office', time: 'Morning', environment: 'Quiet', intensity: 1,
+            characters: { A: { position: 'Standing' }, B: { position: 'Sitting' }, C: { position: 'Doorway' } },
+            important_objects: { Bag: 'On table', Coat: 'On chair' }, acts: ['Discussed plans'], next: ['Make breakfast', 'Go to work'] };
+        r.context.chat.push({ mes: 'They discussed their plans for the morning.'
+            + `<scene_state>{"heat":${heat}}</scene_state><sfw_scene>${JSON.stringify(report)}</sfw_scene>` });
+        Object.assign(r.context.chatMetadata.ttottoNsfw, { autoArmed: true, armSource: 'heat', slowBurnSessionActive: true,
+            slowBurnLocked: true, slowBurnStageOverride: 1, slowBurnRecoveryPending: true });
+        r.settings.slowBurnEnabled = true;
+        r.context.extensionSettings['ttotto-sfw'] = { enabled: true, autoRefine: false, diagnosticsEnabled: true };
+        r.context.chatMetadata.ttottoSfw = { chatSchemaVersion: 1, enabled: true, nsfwSuspended: true, nsfwDelegatedAtAssistantCount: 1 };
+        const script = pairedSfwSource.slice(0, pairedSfwSource.indexOf('const bootContext = getContext();'))
+            .replaceAll('export function ', 'function ').replace('import.meta.url', "'file:///extension/index.js'");
+        vm.runInContext('(function(){' + script + '\nglobalThis.sfw={getSettings,handleIncomingMessage,effectiveState};})();', r.env);
+        r.env.sfw.getSettings();
+        if (order === 'nsfw-first') { r.api.handleIncomingMessage(0); r.env.sfw.handleIncomingMessage(0); }
+        else { r.env.sfw.handleIncomingMessage(0); r.api.handleIncomingMessage(0); }
+        assert.equal(r.context.chatMetadata.ttottoNsfw.autoArmed, false);
+        assert.equal(r.context.chatMetadata.ttottoNsfw.bridgePending, false);
+        assert.equal(r.context.chatMetadata.ttottoSfw.nsfwSuspended, false);
+        const saved = r.env.sfw.effectiveState().state;
+        assert.equal(Object.keys(saved.characters).length, 3);
+        assert.equal(Object.keys(saved.importantObjects).length, 2);
+        assert.equal(saved.next.length, 2);
+        assert.equal(r.calls.length, 0);
+        assert.equal(r.report().current.slowBurnRecoveryPending, false);
+    });
+}

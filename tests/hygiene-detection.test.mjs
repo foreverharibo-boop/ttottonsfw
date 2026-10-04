@@ -167,7 +167,7 @@ test('unrelated ordinary scenes still honor two-message cold streak',()=>{
 test('thresholds, UI, version and heat instructions agree',()=>{
     assert.match(index,/high: 3, normal: 4, low: 7/);
     assert.match(index,/Ordinary bathing, showering/);
-    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.21');
+    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.22');
     assert.match(fs.readFileSync(new URL('settings.html',root),'utf8'),/민감 3점 · 보통 4점 · 둔감 7점/);
 });
 
@@ -360,8 +360,8 @@ test('low reported heat releases auto mode despite remaining local signals',()=>
     r.api.handleIncomingMessage(0);
     assert.equal(r.meta.autoArmed,false);
     assert.equal(r.api.isFullyArmed(),false);
-    // The existing one-response wind-down bridge may still participate after release.
-    r.env.ttottoNsfwSceneBridge.sync();
+    // A low temperature hands ownership back in this same reply.
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),false);
     assert.equal(r.meta.autoArmed,false);
 });
 test('owner bridge consumes a completed heat report before a companion reads ownership',()=>{
@@ -388,13 +388,45 @@ test('owner bridge does not consume a report during main generation',()=>{
     assert.ok(r.context.chat[0].mes.includes('<scene_state>'));
     r.noCalls();
 });
-test('temperature threshold change preserves an intentional slow-burn lock',()=>{
+test('low temperature releases an unfinished slow-burn session in auto mode',()=>{
     const r=runtime({mode:'auto',armed:true,chat:[message('They spoke quietly.<scene_state>{"heat":0}</scene_state>')]});
     r.context.extensionSettings['ttotto-nsfw'].slowBurnEnabled=true;
     r.meta.slowBurnSessionActive=true;
     r.meta.slowBurnStageOverride=1;
     r.meta.slowBurnLocked=true;
     r.api.handleIncomingMessage(0);
-    assert.equal(r.meta.autoArmed,true);
-    assert.equal(r.meta.slowBurnLocked,true);
+    assert.equal(r.meta.autoArmed,false);
+    assert.equal(r.meta.slowBurnSessionActive,false);
+    assert.equal(r.meta.slowBurnRecoveryPending,false);
+    assert.equal(r.meta.bridgePending,false);
+    assert.equal(r.meta.sfwImmediateHandoff,true);
+    assert.equal(r.meta.slowBurnLocked,true); // Keep the user's setting for future sessions.
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),false);
+    r.noCalls();
 });
+
+for (const change of ['none','body','swipe','new-reply','high','missing','manual','forced','generating']) {
+    test(`stored low report reconciliation respects freshness and overrides: ${change}`,()=>{
+        const heat = change === 'high' ? 7 : 0;
+        const reply=message(`They discussed the next morning.<scene_state>{"heat":${heat}}</scene_state>`);
+        const r=runtime({mode:'auto',chat:[reply]});
+        r.api.handleIncomingMessage(0); // Save and strip the report.
+        r.meta.autoArmed=true; r.meta.armSource='heat'; r.meta.bridgePending=true;
+        r.meta.slowBurnSessionActive=true; r.meta.slowBurnRecoveryPending=true;
+        r.context.extensionSettings['ttotto-nsfw'].slowBurnEnabled=true;
+        if(change==='body') reply.mes+=' A correction.';
+        if(change==='swipe') reply.swipe_id=1;
+        if(change==='new-reply') r.context.chat.push(message('A new unreported reply.'));
+        if(change==='missing') delete reply.extra;
+        if(change==='manual') r.context.extensionSettings['ttotto-nsfw'].armMode='manual';
+        if(change==='forced') r.meta.forceArmed=true;
+        if(change==='generating') r.api.beginSceneGeneration('normal',true);
+        assert.equal(r.env.ttottoNsfwSceneBridge.sync(),change!=='none');
+        assert.equal(r.meta.autoArmed,change!=='none');
+        if(change==='none') {
+            assert.equal(r.meta.bridgePending,false);
+            assert.equal(r.meta.slowBurnSessionActive,false);
+        }
+        r.noCalls();
+    });
+}
