@@ -86,7 +86,7 @@ function runtime({mode='stealth', sensitivity='normal', armed=false, force=false
     vm.runInContext(script + '\nglobalThis.testApi={getSettings,getChatMeta,maybeStealthArm,maybeStealthRelease,stealthWindowDetail,handleIncomingMessage,prepareSceneInjection,isFullyArmed,beginSceneGeneration,finishSceneGeneration};',env);
     const api=env.testApi;
     api.getSettings(); api.getChatMeta();
-    return {api, context, env, meta:context.chatMetadata.ttottoNsfw, noForeignChanges:()=>assert.equal(JSON.stringify(foreign),savedForeign), noCalls:()=>assert.equal(calls,0)};
+    return {api, context, env, meta:context.chatMetadata.ttottoNsfw, noForeignChanges:()=>assert.equal(JSON.stringify(foreign),savedForeign), noCalls:()=>assert.equal(calls,0), get scheduled(){return calls;}};
 }
 const message = (mes,is_user=false)=>({mes,is_user});
 for (const mode of ['stealth','auto']) for (const sensitivity of ['high','normal','low']) {
@@ -167,7 +167,7 @@ test('unrelated ordinary scenes still honor two-message cold streak',()=>{
 test('thresholds, UI, version and heat instructions agree',()=>{
     assert.match(index,/high: 3, normal: 4, low: 7/);
     assert.match(index,/Ordinary bathing, showering/);
-    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.19');
+    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.20');
     assert.match(fs.readFileSync(new URL('settings.html',root),'utf8'),/민감 3점 · 보통 4점 · 둔감 7점/);
 });
 
@@ -301,7 +301,7 @@ test('ordinary objects do not cancel a separate real signal',()=>{
     assert.ok(scoreScene('폰만 보지 말고 빨리 내려. 유두를 빨았다.').score>=4);
 });
 for (const mode of ['stealth','auto']) for (const sensitivity of ['high','normal','low']) {
-    test(`ordinary Korean does not activate injection or auxiliary AI: ${mode}/${sensitivity}`,()=>{
+    test(`ordinary Korean remains inactive; only enabled monitor repair may be scheduled: ${mode}/${sensitivity}`,()=>{
         const r=runtime({mode,sensitivity,autoRefine:true,chat:[
             message(everydayKorean[0],true), message(everydayKorean[13]),
         ]});
@@ -310,7 +310,9 @@ for (const mode of ['stealth','auto']) for (const sensitivity of ['high','normal
         assert.equal(r.meta.autoArmed,false);
         assert.equal(r.api.isFullyArmed(),false);
         assert.equal(r.env.ttottoNsfwSceneBridge.sync(),false);
-        r.noCalls();r.noForeignChanges();
+        if (mode === 'auto') assert.equal(r.scheduled, 1);
+        else r.noCalls();
+        r.noForeignChanges();
     });
 }
 test('Korean kissing and vocal signals still accumulate across messages',()=>{
@@ -344,7 +346,7 @@ test('missing AI temperature does not fall back to local activation in auto mode
     r.api.handleIncomingMessage(0);
     assert.equal(r.api.isFullyArmed(),false);
     assert.equal(r.env.ttottoNsfwSceneBridge.sync(),false);
-    r.noCalls();
+    assert.equal(r.scheduled,1); // Enabled monitoring repair, not local activation.
 });
 test('ordinary conversation with low heat and custom matches stays in monitor mode',()=>{
     const r=runtime({mode:'auto',autoRefine:true,chat:[message('질투하며 문자를 보냈다. 어깨를 짚어 길을 비켜줬다.<scene_state>{"heat":2}</scene_state>')]});

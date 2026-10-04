@@ -158,7 +158,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.19';
+const EXTENSION_VERSION = '0.13.20';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -793,7 +793,8 @@ function recentReportedHeat() {
     if (recent.length && nsfwScoreDetail(stripStateTag(recent.at(-1).mes)).routineOnly) return null;
     const message = [...recent].reverse().find((entry) => !entry.is_user);
     if (!message || nsfwScoreDetail(stripStateTag(message.mes)).routineOnly) return null;
-    const state = parseStateFromText(message.mes) ?? snapshotForMessage(message)?.state;
+    const state = parseStateFromText(message.mes)
+        ?? (snapshotMatchesMessage(message) ? snapshotForMessage(message)?.state : null);
     return state?.heat ?? null;
 }
 
@@ -1088,7 +1089,7 @@ function harvestMessage(message) {
         }
     }
     if (!found) {
-        found = Boolean(snapshotForMessage(message));
+        found = snapshotMatchesMessage(message);
     }
     return { changed, found, state };
 }
@@ -1098,24 +1099,46 @@ function assistantMessages() {
     return chat.filter((message) => message && !message.is_user && !message.is_system);
 }
 
-// 유효한 현재 상태: 수동 보정이 최신이면 그것을, 아니면 마지막 스냅샷을 사용.
+function snapshotMatchesMessage(message, snapshot = snapshotForMessage(message)) {
+    return Boolean(snapshot?.state && snapshot.messageSignature === messageStateSignature(message));
+}
+
+function currentStateTarget(message = assistantMessages().at(-1)) {
+    if (!message || isPendingAssistant(message)) return null;
+    return { index: getContext().chat.indexOf(message), swipe: currentSwipeIndex(message), signature: messageStateSignature(message) };
+}
+
+function manualMatchesLatest(manual, message, snapshot) {
+    const target = currentStateTarget(message);
+    if (!manual?.state || !target) return false;
+    if (manual.target) return manual.target.index === target.index && manual.target.swipe === target.swipe
+        && manual.target.signature === target.signature;
+    // Old AI repairs already have a matching message snapshot; unbound manual
+    // records cannot silently override a newer reply or a different swipe.
+    return manual.source === 'ai-refine' && snapshotMatchesMessage(message, snapshot)
+        && manual.at === snapshot.at;
+}
+
+// Current scene facts belong to the latest selected reply, never an older one.
 function effectiveState() {
     const meta = getChatMeta(false);
-    const messages = assistantMessages();
-    let lastSnapshot = null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const snapshot = snapshotForMessage(messages[i]);
-        if (snapshot?.state) {
-            lastSnapshot = snapshot;
-            break;
-        }
-    }
+    const message = assistantMessages().at(-1);
+    if (!message || isPendingAssistant(message)) return { state: null, source: 'none' };
+    const snapshot = snapshotForMessage(message);
+    const valid = snapshotMatchesMessage(message, snapshot);
     const manual = meta?.manualState;
-    if (manual?.state && (!lastSnapshot || Number(manual.at ?? 0) >= Number(lastSnapshot.at ?? 0))) {
+    if (manualMatchesLatest(manual, message, snapshot)
+        && (!valid || Number(manual.at ?? 0) >= Number(snapshot.at ?? 0))) {
         return { state: manual.state, source: manual.source ?? 'manual' };
     }
-    if (lastSnapshot) return { state: lastSnapshot.state, source: 'tag' };
-    return { state: null, source: 'none' };
+    if (valid) return { state: snapshot.state, source: 'tag' };
+    return { state: null, source: snapshot?.state ? 'body-changed' : 'missing-report' };
+}
+
+function stateForDisplay() {
+    const current = effectiveState();
+    if (current.source !== 'body-changed') return current;
+    return { state: snapshotForMessage(assistantMessages().at(-1))?.state ?? null, source: 'body-changed' };
 }
 
 function ignoredActSet() {
@@ -2000,6 +2023,23 @@ function parseRefineResponse(text) {
 
 let refineFailure = null;
 let queuedRefineTarget = null;
+let lastAutoRefineTarget = null;
+
+function sameRefineTarget(left, right) {
+    return Boolean(left && right && left.metadata === right.metadata && left.message === right.message
+        && left.swipe === right.swipe && left.text === right.text);
+}
+
+function autoRefineNeeded() {
+    if (!isSupervising()) return false;
+    const settings = getSettings();
+    const message = assistantMessages().at(-1);
+    if (!message || isPendingAssistant(message)) return false;
+    const state = effectiveState().state;
+    if (isFullyArmed()) return stateCompletenessIssues(state, settings).length > 0;
+    // Stealth has no reporting contract while idle. Temperature monitoring does.
+    return settings.armMode === 'auto' && (state?.heat === null || state?.heat === undefined);
+}
 
 function captureRefineTarget() {
     const context = getContext();
@@ -2009,7 +2049,8 @@ function captureRefineTarget() {
 
 async function runRefine({ manual = false } = {}) {
     const settings = getSettings();
-    if (!runtimeActive) return false;
+    if (!runtimeActive || !settings.enabled || !getChatMeta(false)?.enabled) return false;
+    if (!manual && (!settings.autoRefine || !autoRefineNeeded())) return false;
     if (!manual && generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) return false;
     if (refineRunning) {
         if (!manual) queuedRefineTarget = captureRefineTarget();
@@ -2024,6 +2065,13 @@ async function runRefine({ manual = false } = {}) {
         return false;
     }
 
+    const captured = captureRefineTarget();
+    if (!captured || isPendingAssistant(captured.message)) return false;
+    if (!manual && sameRefineTarget(captured, lastAutoRefineTarget)) return false;
+    clearTimeout(refineTimer);
+    refineTimer = null;
+    queuedRefineTarget = null;
+    lastAutoRefineTarget = captured;
     refineRunning = true;
     refineFailure = null;
     const context = getContext();
@@ -2038,7 +2086,8 @@ async function runRefine({ manual = false } = {}) {
     try {
         const response = await requestRefine(refineAbortController.signal);
         // 보정 호출 중 스와이프/채팅/본문이 바뀌면 이전 장면을 새 답변에 덮어쓰지 않는다.
-        if (getContext().chatMetadata !== metadata || !getContext().chat?.includes(target)
+        if (refineAbortController?.signal.aborted || !runtimeActive || !isSupervising()
+            || getContext().chatMetadata !== metadata || !getContext().chat?.includes(target)
             || assistantMessages().at(-1) !== target
             || currentSwipeIndex(target) !== targetSwipe || recordBody(target.mes) !== targetText) return false;
         const state = parseRefineResponse(response);
@@ -2050,7 +2099,9 @@ async function runRefine({ manual = false } = {}) {
             store.swipes[String(targetSwipe)] = { state, at: refinedAt, messageSignature: messageStateSignature(target) };
             persistChat();
         }
-        meta.manualState = { state, at: refinedAt, source: 'ai-refine' };
+        meta.manualState = { state, at: refinedAt, source: 'ai-refine', target: currentStateTarget() };
+        applyReportedHeat(state, target);
+        if (settings.armMode !== 'manual') maybeStealthRelease();
         saveChatMeta();
         if (manual) toastr.success('보조 AI가 장면 상태를 다시 잡았어요.', '🔞또또NSFW');
         return true;
@@ -2072,15 +2123,21 @@ async function runRefine({ manual = false } = {}) {
 }
 
 function scheduleAutoRefine() {
-    const settings = getSettings();
-    // 무장 상태에서만 자동 보정 — 대기(스텔스/감시) 중 태그가 없는 건 정상이므로 호출 낭비 금지
-    if (!settings.autoRefine || !isFullyArmed()) return;
-    // 생성 시작 감지가 스트리밍 중의 미완성 답변 분석을 예약하지 않도록 한다.
-    // 완성 메시지/생성 종료 이벤트에서 필요한 경우 다시 예약한다.
+    if (!getSettings().autoRefine || !autoRefineNeeded()) return;
     if (generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) return;
-    if (!stateCompletenessIssues(snapshotForMessage(assistantMessages().at(-1))?.state, settings).length) return;
+    const target = captureRefineTarget();
+    if (!target || sameRefineTarget(target, lastAutoRefineTarget)) return;
+    if (refineRunning) { queuedRefineTarget = target; return; }
+    if (refineTimer && sameRefineTarget(target, queuedRefineTarget)) return;
     clearTimeout(refineTimer);
-    refineTimer = setTimeout(() => { void runRefine(); }, 900);
+    queuedRefineTarget = target;
+    refineTimer = setTimeout(() => {
+        refineTimer = null;
+        const queued = queuedRefineTarget;
+        queuedRefineTarget = null;
+        if (sameRefineTarget(queued, captureRefineTarget())) void runRefine();
+        else scheduleAutoRefine();
+    }, 900);
 }
 
 // ───────────────────────── 메시지 이벤트 처리 ─────────────────────────
@@ -2108,6 +2165,57 @@ function persistChat() {
         else if (typeof context.saveChat === 'function') void context.saveChat();
     } catch (error) {
         console.debug(`${LOG_PREFIX} 채팅 저장 생략`, error);
+    }
+}
+
+// Apply the same temperature decision to collected and repaired reports.
+function applyReportedHeat(state, message) {
+    if (!isSupervising()) return;
+    const settings = getSettings();
+    const meta = getChatMeta(false);
+    const hasCurrentNsfwSignal = settings.armMode === 'stealth'
+        && stealthWindowDetail({ ignoreCooldown: true }).score >= STEALTH_THRESHOLDS.normal;
+    // 온도 무장/해제 (히스테리시스: 켜짐 6↑, 꺼짐 2↓). 수동/슬로우번 제어는 유지.
+    if (state?.heat !== null && state?.heat !== undefined && settings.armMode !== 'manual') {
+        if (!meta.autoArmed && state.heat >= AUTO_ARM_ON
+            && !nsfwScoreDetail(stripStateTag(message.mes)).routineOnly) {
+            meta.autoArmed = true;
+            meta.armSource = 'heat';
+            meta.sfwImmediateHandoff = false;
+            saveChatMeta();
+            toastr.info(`장면 온도 ${state.heat}/10 — 연속성 개입을 시작해요.`, '🔞또또NSFW');
+            // 감시 모드에서는 온도만 수집했으므로, 무장 직후 보조 AI로 전체 상태를 백필
+            if (settings.autoRefine) scheduleAutoRefine();
+        } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF && !hasCurrentNsfwSignal) {
+            const prematureSlowBurnEnd = settings.slowBurnEnabled
+                && meta.slowBurnSessionActive
+                && !slowBurnProgress(settings).canConclude;
+            if (prematureSlowBurnEnd) {
+                const firstDetection = !meta.slowBurnRecoveryPending;
+                meta.slowBurnRecoveryPending = true;
+                meta.autoArmed = true;
+                meta.bridgePending = false;
+                saveChatMeta();
+                if (firstDetection) toastr.warning('최소 턴 전에 장면 종료를 감지했어요. 개입을 유지하고 다음 응답에서 장면을 이어가게 해요.', '🔞또또NSFW');
+            } else {
+                meta.autoArmed = false;
+                meta.forceArmed = false;
+                const sceneEnded = stealthColdStreak();
+                meta.bridgePending = Boolean(settings.exitBridge && !sceneEnded);
+                meta.sfwImmediateHandoff = sceneEnded;
+                resetSlowBurnSession(meta);
+                if (settings.armMode === 'stealth') {
+                    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
+                    meta.stealthCooldownFrom = chat.length; // 이후 메시지부터 다시 감지
+                    meta.stealthCooldownReason = 'heat';
+                }
+                saveChatMeta();
+                toastr.info(`장면 온도 ${state.heat}/10 — 개입을 해제하고 대기로 돌아가요.`, '🔞또또NSFW');
+            }
+        } else if (state.heat > AUTO_ARM_OFF && meta.slowBurnRecoveryPending) {
+            meta.slowBurnRecoveryPending = false;
+            saveChatMeta();
+        }
     }
 }
 
@@ -2141,53 +2249,7 @@ function handleIncomingMessage(index) {
     }
     // 스텔스만 본문 점수로 시작/유지한다. 온도 자동은 AI의 온도 보고를 따른다.
     maybeStealthArm();
-    const hasCurrentNsfwSignal = settings.armMode === 'stealth'
-        && stealthWindowDetail({ ignoreCooldown: true }).score >= STEALTH_THRESHOLDS.normal;
-    // 온도 무장/해제 (히스테리시스: 켜짐 6↑, 꺼짐 2↓). 수동/슬로우번 제어는 유지.
-    if (state?.heat !== null && state?.heat !== undefined && settings.armMode !== 'manual') {
-        if (!meta.autoArmed && state.heat >= AUTO_ARM_ON
-            && !nsfwScoreDetail(stripStateTag(message.mes)).routineOnly) {
-            meta.autoArmed = true;
-            meta.armSource = 'heat';
-            meta.sfwImmediateHandoff = false;
-            saveChatMeta();
-            toastr.info(`장면 온도 ${state.heat}/10 — 연속성 개입을 시작해요.`, '🔞또또NSFW');
-            // 감시 모드에서는 온도만 수집했으므로, 무장 직후 보조 AI로 전체 상태를 백필
-            if (settings.autoRefine) {
-                clearTimeout(refineTimer);
-                refineTimer = setTimeout(() => { void runRefine(); }, 400);
-            }
-        } else if (meta.autoArmed && state.heat <= AUTO_ARM_OFF && !hasCurrentNsfwSignal) {
-            const prematureSlowBurnEnd = settings.slowBurnEnabled
-                && meta.slowBurnSessionActive
-                && !slowBurnProgress(settings).canConclude;
-            if (prematureSlowBurnEnd) {
-                const firstDetection = !meta.slowBurnRecoveryPending;
-                meta.slowBurnRecoveryPending = true;
-                meta.autoArmed = true;
-                meta.bridgePending = false;
-                saveChatMeta();
-                if (firstDetection) toastr.warning('최소 턴 전에 장면 종료를 감지했어요. 개입을 유지하고 다음 응답에서 장면을 이어가게 해요.', '🔞또또NSFW');
-            } else {
-                meta.autoArmed = false;
-                meta.forceArmed = false;
-                const sceneEnded = stealthColdStreak();
-                meta.bridgePending = Boolean(settings.exitBridge && !sceneEnded);
-                meta.sfwImmediateHandoff = sceneEnded;
-                resetSlowBurnSession(meta);
-                if (settings.armMode === 'stealth') {
-                    const chat = Array.isArray(getContext().chat) ? getContext().chat : [];
-                    meta.stealthCooldownFrom = chat.length; // 이후 메시지부터 다시 감지
-                    meta.stealthCooldownReason = 'heat';
-                }
-                saveChatMeta();
-                toastr.info(`장면 온도 ${state.heat}/10 — 개입을 해제하고 대기로 돌아가요.`, '🔞또또NSFW');
-            }
-        } else if (state.heat > AUTO_ARM_OFF && meta.slowBurnRecoveryPending) {
-            meta.slowBurnRecoveryPending = false;
-            saveChatMeta();
-        }
-    }
+    applyReportedHeat(state, message);
     // 해제 폴백: 모델의 온도 보고와 무관하게, 최근 턴들이 연속으로 신호 0점이면 개입 해제
     // (모델이 온도를 계속 높게 불러서 일상 장면에까지 진행 지시가 들어가는 것 방지)
     if (settings.armMode !== 'manual') maybeStealthRelease();
@@ -2265,7 +2327,7 @@ function applyManualEdit(mutator) {
     const { state } = effectiveState();
     const base = state ? structuredClone(state) : { location: '', characters: {}, acts: [] };
     mutator(base);
-    meta.manualState = { state: sanitizeState(base) ?? base, at: Date.now(), source: 'manual' };
+    meta.manualState = { state: sanitizeState(base) ?? base, at: Date.now(), source: 'manual', target: currentStateTarget() };
     saveChatMeta();
     updateUi();
 }
@@ -2384,31 +2446,30 @@ function renderCardLinkPanel(settings) {
 }
 
 function renderStatePanel() {
-    const { state, source } = effectiveState();
+    const { state, source } = stateForDisplay();
+    const current = effectiveState();
     const settings = getSettings();
     const armMeta = getChatMeta(false);
     renderSlowBurnPanel(settings);
     renderCardLinkPanel(settings);
-    const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
+    const sourceLabel = { 'body-changed': '저장 후 본문 변경 · 최신 온도 미확인 · 상태 다시 분석으로 복구 (추가 AI 호출)', 'missing-report': '최신 보고 누락 · 상태 다시 분석으로 복구 (추가 AI 호출)', tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
     const incomplete = isFullyArmed() && stateCompletenessIssues(state, settings).length > 0;
-    element('tns-state-source').textContent = isSupervising() && settings.armMode === 'auto' && !isFullyArmed()
-        ? (armMeta?.bridgePending ? '일상 복귀 중 · 종료 브릿지 대기' : '온도 감시 중 · NSFW 개입·장면 수집 대기')
-        : refineRunning ? '보조 AI 분석 중…'
+    element('tns-state-source').textContent = refineRunning ? '보조 AI 분석 중…'
         : refineFailure?.metadata === getContext().chatMetadata ? `상태 보정 실패: ${refineFailure.message}`
+        : ['missing-report', 'body-changed'].includes(source) ? sourceLabel
+        : isSupervising() && settings.armMode === 'auto' && !isFullyArmed()
+            ? (armMeta?.bridgePending ? '일상 복귀 중 · 종료 브릿지 대기' : '온도 감시 중 · NSFW 개입·장면 수집 대기')
         : incomplete ? `전체 장면 기록 미완성 · ${settings.autoRefine ? '자동 보정 사용 중' : '자동 보정 꺼짐'}`
         : sourceLabel;
 
     const heatBadge = element('tns-heat');
-    if (state?.heat !== null && state?.heat !== undefined) {
-        heatBadge.hidden = false;
-        heatBadge.textContent = armMeta?.autoArmed && armMeta.armSource === 'local'
-            ? `🌡️ 성적 온도 보고 ${state.heat}/10 · 본문 감지`
-            : `🌡️ 성적 온도 ${state.heat}/10`;
-        heatBadge.title = 'AI가 보고한 성적 온도입니다. 본문 감지는 이 값과 별도로 판단합니다.';
-        heatBadge.classList.toggle('is-hot', Boolean(armMeta?.autoArmed) || state.heat >= AUTO_ARM_ON);
-    } else {
-        heatBadge.hidden = true;
-    }
+    const heat = current.state?.heat;
+    heatBadge.hidden = !assistantMessages().length;
+    heatBadge.textContent = heat !== null && heat !== undefined
+        ? `🌡️ 성적 온도 ${heat}/10${armMeta?.autoArmed && armMeta.armSource === 'local' ? ' · 본문 감지' : ''}`
+        : '🌡️ 최신 온도 미확인';
+    heatBadge.title = '최신 답변과 일치하는 온도 보고만 표시합니다. 누락은 0이 아닙니다.';
+    heatBadge.classList.toggle('is-hot', heat !== null && heat !== undefined && heat >= AUTO_ARM_ON);
 
     const locationInput = element('tns-state-location');
     if (document.activeElement !== locationInput) locationInput.value = biText(state?.location);
@@ -2716,7 +2777,7 @@ function updateUi() {
         const heat = effectiveState().state?.heat;
         const heatText = meta?.autoArmed && meta.armSource === 'local'
             ? ' (본문 신호 감지)'
-            : heat !== null && heat !== undefined ? ` (온도 ${heat}/10)` : '';
+            : heat !== null && heat !== undefined ? ` (온도 ${heat}/10)` : ' (최신 온도 미확인)';
         element('tns-header-status').textContent = !settings.enabled
             ? '꺼져 있어요'
             : !settings.adultConfirmed
@@ -2732,6 +2793,9 @@ function updateUi() {
                                 : '장면을 지켜보는 중이에요';
 
         element('tns-refine').disabled = refineRunning;
+        element('tns-refine-label').textContent = ['missing-report', 'body-changed'].includes(effectiveState().source)
+            ? '누락·변경 상태 복구' : '상태 다시 분석';
+        element('tns-refine').title = '선택한 보정 연결로 최신 답변을 분석합니다. 추가 AI 호출 비용이 발생합니다.';
         element('tns-force-arm-label').textContent = isFullyArmed() ? '개입 해제' : '지금 개입';
         renderStatePanel();
 
@@ -3216,6 +3280,7 @@ function registerEvents() {
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
         queuedRefineTarget = null;
+        lastAutoRefineTarget = null;
         refineFailure = null;
         rewriteGeneration = null;
         generationEvents = [];
