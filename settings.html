@@ -25,6 +25,7 @@
 
       <div class="tns-tabs" role="tablist" aria-label="또또NSFW 메뉴">
         <button id="tns-tab-state" class="menu_button tns-tab is-active" type="button" role="tab" aria-selected="true" data-tns-tab="state">장면 상태</button>
+        <button id="tns-tab-diagnostics" class="menu_button tns-tab" type="button" role="tab" aria-selected="false" data-tns-tab="diagnostics">진단 기록</button>
         <button id="tns-tab-settings" class="menu_button tns-tab" type="button" role="tab" aria-selected="false" data-tns-tab="settings">설정</button>
       </div>
 
@@ -155,6 +156,29 @@
             <i class="fa-solid fa-broom" aria-hidden="true"></i> 기록 비우기
           </button>
         </div>
+      </section>
+
+      <section id="tns-panel-diagnostics" class="tns-panel" role="tabpanel" aria-labelledby="tns-tab-diagnostics" hidden>
+        <div class="tns-diagnostic-toolbar">
+          <strong>NSFW 수집 진단 기록</strong>
+          <label class="tns-diagnostic-switch" for="tns-diagnostics-enabled">
+            <input id="tns-diagnostics-enabled" type="checkbox">
+            <span>기록 켜기</span>
+          </label>
+        </div>
+        <small id="tns-diagnostic-status">기록 꺼짐</small>
+        <div class="tns-diagnostic-actions">
+          <button id="tns-diagnostic-copy" class="menu_button" type="button">복사</button>
+          <button id="tns-diagnostic-download" class="menu_button" type="button">다운로드</button>
+          <button id="tns-diagnostic-clear" class="menu_button" type="button">비우기</button>
+        </div>
+        <textarea id="tns-diagnostic-log" class="text_pole" rows="16" wrap="off" readonly aria-label="NSFW 수집 진단 기록"></textarea>
+        <small>답변과 후처리가 끝난 뒤 다운로드해 주세요. 새로고침 전에 저장해야 해요.</small>
+        <details class="tns-diagnostic-help">
+          <summary>어떤 정보가 기록되나요?</summary>
+          <p>서버 응답의 태그 유무 → 수집 시점 → 온도·개입 판정 → 저장 결과 → 본문 변경을 함께 기록해요. 최근 400건을 보관하며 추가 AI 호출은 없어요.</p>
+          <p>내려받는 로그에는 API 키·대화 본문·인물 이름이 포함되지 않아요. 본문이 달라 응답을 연결할 수 없거나 응답을 읽지 못하면 미확인으로 표시해요.</p>
+        </details>
       </section>
 
       <section id="tns-panel-settings" class="tns-panel" role="tabpanel" aria-labelledby="tns-tab-settings" hidden>

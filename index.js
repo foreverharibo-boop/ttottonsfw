@@ -158,7 +158,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.20';
+const EXTENSION_VERSION = '0.13.21';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -270,6 +270,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     styleLength: 'normal', // 'tight' | 'normal' | 'long' — 무장 중 응답 길이
     styleBalance: 'balanced', // 'dialogue' | 'balanced' | 'sensory' | 'internal' — 무장 중 묘사 밸런스
     exitBridge: true, // 해제 직후 한 번, 장면 마무리 지시 주입
+    diagnosticsEnabled: false,
     autoRefine: true,
     refineProfileId: '',
     refineVertexAuthMode: 'profile',
@@ -289,6 +290,396 @@ let settingsHomeParent = null;
 let developerTapCount = 0;
 let developerTapTimer = null;
 const registeredEventHandlers = [];
+
+// Opt-in, bounded, memory-only diagnostics. No message bodies, names, keys,
+// profile identifiers, URLs, or raw error text are retained.
+const DIAGNOSTIC_LIMIT = 400;
+let diagnosticRows = [];
+let diagnosticSequence = 0;
+let diagnosticRequestSequence = 0;
+let diagnosticEpoch = 0;
+let diagnosticChatSequence = 0;
+const diagnosticChats = new WeakMap();
+let diagnosticFetchWrapper = null;
+let diagnosticOriginalFetch = null;
+// Response copies are read only while diagnostics are enabled. All exported
+// records contain structure only; the original response/promise is untouched.
+const DIAGNOSTIC_RESPONSE_BYTES = 1024 * 1024;
+const diagnosticReaders = new Set();
+const diagnosticResponseSlots = new Set();
+let diagnosticBodies = new Map();
+let diagnosticResponses = [];
+function resetDiagnosticEvidence() {
+    for (const reader of diagnosticReaders) { try { void reader.cancel().catch(() => {}); } catch {} }
+    diagnosticReaders.clear(); diagnosticResponseSlots.clear(); diagnosticBodies.clear(); diagnosticResponses = [];
+}
+function diagnosticNsfwReport(text) {
+    const blocks = [...String(text ?? '').matchAll(/<scene_state\b[^>]*>([\s\S]*?)<\/scene_state>/gi)];
+    let heat = null;
+    try {
+        const raw = blocks.at(-1)?.[1];
+        if (raw) {
+            const parsed = parseStateJson(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+            if (typeof parsed.heat === 'number' && Number.isFinite(parsed.heat)) heat = parsed.heat;
+        }
+    } catch { /* No guessing on malformed reports. */ }
+    return { nsfwHeatPresent: heat !== null, ...(heat !== null ? { nsfwHeat: heat } : {}) };
+}
+function diagnosticTextShape(text) {
+    const state = parseStateFromText(text);
+    return {
+        chars: text.length, bodyChars: recordBody(text).length,
+        openTag: /<scene_state\b/i.test(text), closeTag: /<\/scene_state\s*>/i.test(text),
+        escapedTag: /&lt;scene_state\b/i.test(text), sfwTag: /<sfw_scene\b/i.test(text),
+        parsed: Boolean(state), characters: Object.keys(state?.characters ?? {}).length,
+        objects: Object.keys(state?.importantObjects ?? {}).length, nextCandidates: state?.next?.length ?? 0, ...diagnosticNsfwReport(text),
+        missing: state ? stateCompletenessIssues(state) : ['state'],
+    };
+}
+function diagnosticLink(message, index, text, chat = diagnosticScope()) {
+    const body = recordBody(text);
+    const candidates = diagnosticResponses.filter(r => r.chat === chat && Date.now() - r.at < 120000);
+    const matches = candidates.filter(r => r.body === body);
+    diagnosticRecord('response_message_link', {
+        message: index, swipe: currentSwipeIndex(message), candidates: candidates.length, matches: matches.length,
+        reason: matches.length === 1 ? 'exact_body_match' : matches.length ? 'ambiguous_body_match' : 'no_exact_body_match',
+        ...(matches.length === 1 ? { requestId: matches[0].requestId, candidate: matches[0].candidate,
+            serverTag: matches[0].tag, serverComplete: matches[0].complete } : {}),
+    }, chat);
+}
+function diagnosticTrackBody(message, index, phase) {
+    if (!diagnosticsEnabled() || !message || message.is_user || message.is_system) return;
+    const text = String(message.mes ?? '');
+    const swipe = currentSwipeIndex(message), chat = diagnosticScope();
+    const previous = diagnosticBodies.get(message);
+    if (!previous || previous.swipe !== swipe || previous.chat !== chat) {
+        diagnosticRecord('body_checkpoint', { reason: phase, message: index, swipe, ...diagnosticTextShape(text) }, chat);
+        diagnosticLink(message, index, text, chat);
+    } else if (previous.text !== text) {
+        const old = previous.text;
+        let start = 0, endOld = old.length, endNew = text.length;
+        while (start < Math.min(endOld, endNew) && old[start] === text[start]) start++;
+        while (endOld > start && endNew > start && old[endOld - 1] === text[endNew - 1]) { endOld--; endNew--; }
+        const withoutSpace = s => s.replace(/\s/g, '');
+        const withoutMarkup = s => withoutSpace(s.replace(/<[^>]*>/g, '').replace(/[*_`]/g, ''));
+        diagnosticRecord('body_changed', {
+            reason: phase, message: index, swipe, beforeChars: old.length, afterChars: text.length,
+            removedChars: endOld - start, addedChars: endNew - start,
+            sameSceneBody: recordBody(old) === recordBody(text),
+            whitespaceOnly: withoutSpace(old) === withoutSpace(text),
+            markupOnly: withoutMarkup(old) === withoutMarkup(text),
+            oldOpenTag: /<scene_state\b/i.test(old), newOpenTag: /<scene_state\b/i.test(text),
+        }, chat);
+        diagnosticLink(message, index, text, chat);
+    }
+    // Short-lived bounded copies for change classification, never serialized.
+    if (text.length <= 65536) {
+        diagnosticBodies.delete(message);
+        diagnosticBodies.set(message, { text, swipe, index, chat });
+        if (diagnosticBodies.size > 12) diagnosticBodies.delete(diagnosticBodies.keys().next().value);
+    } else {
+        diagnosticBodies.delete(message);
+        diagnosticRecord('body_checkpoint_skipped', { reason: 'size_limit', message: index, swipe }, chat);
+    }
+}
+function diagnosticOutputParts(payload) {
+    const rows = [];
+    const contentText = content => typeof content === 'string' ? content : Array.isArray(content)
+        ? content.filter(p => !p?.thought && (p?.type === 'text' || p?.type === 'output_text' || !p?.type))
+            .map(p => typeof p?.text === 'string' ? p.text : '').join('') : '';
+    if (typeof payload === 'string') rows.push({ text: payload, candidate: 0 });
+    else if (Array.isArray(payload?.choices)) payload.choices.forEach((c, i) => rows.push({
+        text: contentText(c.message?.content ?? c.delta?.content ?? c.text), candidate: c.index ?? i, finish: c.finish_reason, refused: Boolean(c.message?.refusal),
+    }));
+    else if (Array.isArray(payload?.candidates)) payload.candidates.forEach((c, i) => rows.push({
+        text: contentText(c.content?.parts), candidate: c.index ?? i, finish: c.finishReason,
+    }));
+    else if (Array.isArray(payload?.results)) payload.results.forEach((c, i) => rows.push({ text: contentText(c.text), candidate: i }));
+    else if (Array.isArray(payload?.output)) rows.push({ text: payload.output.filter(p => p.type === 'message').map(p => contentText(p.content)).join(''), candidate: 0, finish: payload.status });
+    else if (payload?.type === 'content_block_delta') rows.push({ text: payload.delta?.type === 'text_delta' ? contentText(payload.delta.text) : '', candidate: 0 });
+    else if (payload?.type === 'content_block_start') rows.push({ text: payload.content_block?.type === 'text' ? contentText(payload.content_block.text) : '', candidate: 0 });
+    else if (payload?.type === 'message_delta') rows.push({ text: '', candidate: 0, finish: payload.delta?.stop_reason });
+    else if (typeof payload?.content === 'string' || Array.isArray(payload?.content)) rows.push({ text: contentText(payload.content), candidate: 0, finish: payload.stop_reason });
+    else if (typeof payload?.text === 'string') rows.push({ text: payload.text, candidate: 0 });
+    return rows;
+}
+async function diagnosticInspectResponse(response, info, requestId, chat, epoch) {
+    const alive = () => diagnosticsEnabled() && epoch === diagnosticEpoch;
+    const discard = () => { try { void response?.body?.cancel().catch(() => {}); } catch {} };
+    if (!alive()) { discard(); return; }
+    const record = (stage, data) => { if (alive()) diagnosticRecord(stage, { requestId, ...data }, chat); };
+    if (!info?.reportInstruction) { discard(); record('server_response_skipped', { reason: info ? 'no_report_instruction' : 'request_unreadable' }); return; }
+    let reader, timer;
+    try {
+        if (response && !response.ok) { discard(); record('server_response_unavailable', { reason: 'http_error', status: response.status }); return; }
+        if (!response) { record('server_response_unavailable', { reason: 'clone_failed' }); return; }
+        const copy = response;
+        if (!copy.body?.getReader) { record('server_response_unavailable', { reason: 'unreadable_body' }); return; }
+        reader = copy.body.getReader(); diagnosticReaders.add(reader);
+        let timedOut = false;
+        timer = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => {}); }, 45000);
+        const decoder = new TextDecoder();
+        let raw = '', bytes = 0, ended = false, limited = false;
+        while (alive()) {
+            const chunk = await reader.read();
+            if (chunk.done) { ended = !timedOut; break; }
+            bytes += chunk.value.byteLength;
+            if (bytes > DIAGNOSTIC_RESPONSE_BYTES) { limited = true; break; }
+            raw += decoder.decode(chunk.value, { stream: true });
+        }
+        if (!alive()) return;
+        raw += decoder.decode();
+        if (limited || timedOut) { record('server_response_unavailable', { reason: limited ? 'size_limit' : 'read_timeout', bytes }); return; }
+        const stream = Boolean(info.stream) || /text\/event-stream/i.test(copy.headers.get('content-type') ?? '');
+        let rows = [], complete = ended, malformed = false, terminated = false;
+        if (stream) {
+            const candidates = new Map();
+            for (const event of raw.replace(/\r\n?/g, '\n').split(/\n\n/)) {
+                const data = event.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+                if (!data) continue;
+                if (data === '[DONE]') { terminated = true; continue; }
+                let payload; try { payload = JSON.parse(data); } catch { malformed = true; continue; }
+                if (payload.type === 'message_stop') terminated = true;
+                for (const part of diagnosticOutputParts(payload)) {
+                    const key = Number(part.candidate) || 0;
+                    const target = candidates.get(key) ?? { text: '', candidate: key };
+                    target.text += part.text; if (part.finish) { target.finish = part.finish; terminated = true; }
+                    candidates.set(key, target);
+                }
+            }
+            rows = [...candidates.values()]; complete = ended && terminated && !malformed;
+        } else {
+            let payload;
+            try { payload = JSON.parse(raw); } catch { record('server_response_unavailable', { reason: 'invalid_json', bytes }); return; }
+            rows = diagnosticOutputParts(payload);
+        }
+        if (!rows.length) { record('server_response_unavailable', { reason: 'unsupported_response', stream, bytes }); return; }
+        for (const row of rows) {
+            const body = recordBody(row.text), shape = diagnosticTextShape(row.text);
+            record('server_response_observed', { ...shape, candidate: Number(row.candidate) || 0, stream, complete, bytes,
+                reason: !complete ? 'incomplete_stream' : row.refused || /^(?:content_filter|SAFETY|RECITATION)$/.test(row.finish ?? '') ? 'blocked_response' : !row.text ? 'empty_answer' : shape.parsed ? 'parsed_tag' : shape.openTag ? 'invalid_or_unclosed_tag' : shape.escapedTag ? 'escaped_tag' : 'missing_tag',
+                tokenLimited: /^(?:length|max_tokens|MAX_TOKENS)$/.test(row.finish ?? ''),
+                stopped: /^(?:stop|end_turn|stop_sequence|STOP|completed)$/.test(row.finish ?? ''),
+            });
+            // Bounded transient bodies allow exact matching, never stored in chat or exported.
+            if (body.length <= 65536) diagnosticResponses.push({ chat, at: Date.now(), requestId, candidate: Number(row.candidate) || 0,
+                body, tag: shape.openTag, complete });
+            if (diagnosticResponses.length > 20) diagnosticResponses.shift();
+        }
+        for (const [message, entry] of diagnosticBodies) if (entry.chat === chat && entry.swipe === currentSwipeIndex(message)) diagnosticLink(message, entry.index, entry.text, chat);
+    } catch { record('server_response_unavailable', { reason: 'read_failed' }); }
+    finally {
+        clearTimeout(timer);
+        if (reader) { diagnosticReaders.delete(reader); try { void reader.cancel().catch(() => {}); } catch {} }
+    }
+}
+
+function diagnosticsEnabled() {
+    return Boolean(runtimeActive && getContext().extensionSettings?.[MODULE_NAME]?.diagnosticsEnabled);
+}
+function diagnosticScope() {
+    const metadata = getContext().chatMetadata;
+    if (!metadata || typeof metadata !== 'object') return 0;
+    if (!diagnosticChats.has(metadata)) diagnosticChats.set(metadata, ++diagnosticChatSequence);
+    return diagnosticChats.get(metadata);
+}
+function diagnosticRecord(stage, data = {}, chat = diagnosticScope()) {
+    if (!diagnosticsEnabled()) return;
+    // Only call with structural values computed below, never API/user text.
+    const values = {};
+    for (const [key, value] of Object.entries(data)) {
+        if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) values[key] = value;
+        else if (key === 'reason' && /^[a-z_-]{1,48}$/.test(value)) values[key] = value;
+        else if (key === 'missing' && Array.isArray(value)) values[key] = value.filter(v => ['state', 'location', 'characters', 'acts', 'heat', 'stage', 'next'].includes(v));
+    }
+    const previous = diagnosticRows.at(-1);
+    if (previous?.stage === stage && previous.chat === chat && JSON.stringify(previous.data) === JSON.stringify(values)) {
+        previous.repeats++;
+        previous.lastAt = new Date().toISOString();
+    } else {
+        diagnosticRows.push({ seq: ++diagnosticSequence, at: new Date().toISOString(), chat, stage, data: values, repeats: 1 });
+        if (diagnosticRows.length > DIAGNOSTIC_LIMIT) diagnosticRows.shift();
+    }
+    renderDiagnostics();
+}
+function diagnosticCache(message) {
+    const snapshot = snapshotForMessage(message);
+    return {
+        saved: Boolean(snapshot?.state), cached: snapshotMatchesMessage(message, snapshot),
+        bodyChars: recordBody(message?.mes).length,
+        savedBodyChars: Number(String(snapshot?.messageSignature ?? '').split(':')[1] ?? -1),
+        savedCharacters: Object.keys(snapshot?.state?.characters ?? {}).length,
+        savedNextCandidates: snapshot?.state?.next?.length ?? 0,
+        savedHeatPresent: snapshot?.state?.heat !== null && snapshot?.state?.heat !== undefined,
+        ...(snapshot?.state?.heat !== null && snapshot?.state?.heat !== undefined ? { savedHeat: snapshot.state.heat } : {}),
+    };
+}
+function diagnosticState() {
+    const settings = getContext().extensionSettings?.[MODULE_NAME] ?? {};
+    const meta = getContext().chatMetadata?.[CHAT_STATE_KEY] ?? {};
+    const current = effectiveState();
+    const heat = current.state?.heat;
+    return { enabled: Boolean(settings.enabled), chatEnabled: Boolean(meta.enabled), adultConfirmed: Boolean(settings.adultConfirmed),
+        autoRefine: Boolean(settings.autoRefine), modeAuto: settings.armMode === 'auto', modeStealth: settings.armMode === 'stealth', modeManual: settings.armMode === 'manual',
+        autoArmed: Boolean(meta.autoArmed), armedByHeat: Boolean(meta.autoArmed && meta.armSource === 'heat'), armedLocally: Boolean(meta.autoArmed && meta.armSource === 'local'), forceArmed: Boolean(meta.forceArmed), bridgePending: Boolean(meta.bridgePending),
+        currentHeatPresent: heat !== null && heat !== undefined,
+        ...(heat !== null && heat !== undefined ? { currentHeat: heat } : {}),
+        latestReportMissing: current.source === 'missing-report', latestBodyChanged: current.source === 'body-changed',
+        refineRunning, pendingGenerations: generationEvents.length };
+}
+function diagnosticReport() {
+    return JSON.stringify({ extension: MODULE_NAME, version: EXTENSION_VERSION, recording: diagnosticsEnabled(),
+        note: 'Memory-only; no API keys or dialogue contents. request_observed means the fetch boundary, not proof of model receipt. server_response_observed describes a bounded response copy at the fetch boundary, not guaranteed provider-original output if another wrapper precedes this one. Response/message links require matching bodies; unmatched or ambiguous results are unconfirmed. No raw bodies are exported.',
+        current: diagnosticState(), events: diagnosticRows }, null, 2);
+}
+function renderDiagnostics() {
+    try {
+        const box = document.getElementById('tns-diagnostic-log');
+        if (box) box.value = diagnosticReport();
+        const status = document.getElementById('tns-diagnostic-status');
+        if (status) status.textContent = `${diagnosticsEnabled() ? '기록 중' : '기록 꺼짐'} · ${diagnosticRows.length}/${DIAGNOSTIC_LIMIT}건 · 새로고침하면 지워져요`;
+    } catch { /* A missing/stale diagnostics panel must not affect generation. */ }
+}
+function clearDiagnostics() {
+    diagnosticRows = [];
+    diagnosticEpoch++;
+    resetDiagnosticEvidence();
+    renderDiagnostics();
+}
+function diagnosticResponse(message, index) {
+    if (!diagnosticsEnabled()) return;
+    diagnosticTrackBody(message, index, 'before_collection');
+    const text = String(message.mes ?? '');
+    const state = parseStateFromText(text);
+    let reason = 'missing_tag';
+    if (/<scene_state\b/i.test(text)) {
+        reason = /<\/scene_state\s*>/i.test(text) ? 'invalid_tag' : 'unclosed_tag';
+        if (state) reason = 'parsed_tag';
+        else if (reason === 'invalid_tag') {
+            const blocks = [...text.matchAll(STATE_TAG_REGEX)];
+            const json = blocks.at(-1)?.[1] ?? '';
+            try {
+                const start = json.indexOf('{'), end = json.lastIndexOf('}');
+                if (start < 0 || end <= start) throw new Error();
+                parseStateJson(json.slice(start, end + 1));
+                reason = 'empty_state';
+            } catch { reason = 'invalid_json'; }
+        }
+    }
+    diagnosticRecord('response_observed', {
+        reason,
+        message: index, swipe: currentSwipeIndex(message), chars: text.length,
+        openTag: /<scene_state\b/i.test(text), closeTag: /<\/scene_state\s*>/i.test(text),
+        escapedTag: /&lt;scene_state\b/i.test(text), sfwTag: /<sfw_scene\b/i.test(text),
+        parsed: Boolean(state), ...diagnosticCache(message),
+        characters: Object.keys(state?.characters ?? {}).length,
+        objects: Object.keys(state?.importantObjects ?? {}).length, nextCandidates: state?.next?.length ?? 0, ...diagnosticNsfwReport(text),
+        missing: state ? stateCompletenessIssues(state) : ['state'], ...diagnosticState(),
+    });
+}
+function diagnosticInspectPayload(body, requestId, chat, epoch) {
+    if (!diagnosticsEnabled() || epoch !== diagnosticEpoch) return;
+    let payload;
+    try { payload = typeof body === 'string' ? JSON.parse(body) : null; } catch { /* opaque body */ }
+    if (!payload || typeof payload !== 'object') {
+        diagnosticRecord('request_observed', { requestId, readable: false }, chat);
+        return;
+    }
+    const parts = [];
+    for (const message of Array.isArray(payload.messages) ? payload.messages : []) {
+        if (typeof message?.content === 'string') parts.push(message.content);
+        else if (Array.isArray(message?.content)) {
+            for (const item of message.content) if (typeof item?.text === 'string') parts.push(item.text);
+        }
+    }
+    if (typeof payload.prompt === 'string') parts.push(payload.prompt);
+    const content = parts.join('\n');
+    const monitor = content.includes('[Scene Monitor]');
+    const fullReport = content.includes('STATE REPORT: End your response with exactly one state block') && content.includes('<scene_state>');
+    const info = {
+        requestId, readable: true, stream: Boolean(payload.stream),
+        reportInstruction: (monitor || fullReport) && content.includes('<scene_state>'),
+        nsfwMonitor: monitor, nsfwFullReport: fullReport,
+        sfwReport: content.includes('<sfw_scene>'),
+        messages: Array.isArray(payload.messages) ? payload.messages.length : 0,
+    };
+    diagnosticRecord('request_observed', info, chat);
+    return info;
+}
+function stopDiagnosticFetch() {
+    diagnosticEpoch++;
+    resetDiagnosticEvidence();
+    if (diagnosticFetchWrapper && globalThis.fetch === diagnosticFetchWrapper) {
+        globalThis.fetch = diagnosticOriginalFetch;
+        diagnosticFetchWrapper = null;
+        diagnosticOriginalFetch = null;
+    }
+    // If another extension wrapped us, leave that wrapper intact. Ours is inert
+    // while diagnostics are off, and can be reused when enabled again.
+}
+function syncDiagnosticFetch() {
+    if (!diagnosticsEnabled()) { stopDiagnosticFetch(); return; }
+    if (diagnosticFetchWrapper || typeof globalThis.fetch !== 'function') return;
+    const original = globalThis.fetch;
+    diagnosticOriginalFetch = original;
+    diagnosticFetchWrapper = function (...args) {
+        let observed = false, requestId, chat, epoch, requestInfo;
+        try {
+            if (diagnosticsEnabled()) {
+                const [input, init] = args;
+                const url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input?.url, globalThis.location?.href);
+                observed = url.origin === globalThis.location?.origin
+                    && /^\/api\/backends\/(?:chat|text)-completions\/generate$/.test(url.pathname);
+                if (observed) {
+                    requestId = ++diagnosticRequestSequence;
+                    chat = diagnosticScope(); epoch = diagnosticEpoch;
+                    if (init && Object.prototype.hasOwnProperty.call(init, 'body')) requestInfo = diagnosticInspectPayload(init.body, requestId, chat, epoch);
+                    else if (typeof Request !== 'undefined' && input instanceof Request) {
+                        // Clone before the request consumes its body; never await it.
+                        requestInfo = input.clone().text().then(body => diagnosticInspectPayload(body, requestId, chat, epoch)).catch(() => null);
+                    } else diagnosticInspectPayload(null, requestId, chat, epoch);
+                }
+            }
+        } catch { /* diagnostics must never break generation */ }
+        const result = Reflect.apply(original, this, args);
+        if (observed && typeof result?.then === 'function') void result.then(response => {
+            if (epoch === diagnosticEpoch) {
+                diagnosticRecord('request_finished', { requestId, status: response.status, ok: response.ok }, chat);
+                // Reserve a bounded slot and clone before the caller consumes it.
+                if (diagnosticResponseSlots.size >= 4) {
+                    diagnosticRecord('server_response_unavailable', { requestId, reason: 'reader_limit' }, chat);
+                    return;
+                }
+                const slot = {}; diagnosticResponseSlots.add(slot);
+                let copy = null;
+                if (requestInfo?.reportInstruction || typeof requestInfo?.then === 'function') {
+                    try { copy = response.clone(); } catch {}
+                }
+                void Promise.resolve(requestInfo).then(info => diagnosticInspectResponse(copy, info, requestId, chat, epoch))
+                    .catch(() => {}).finally(() => diagnosticResponseSlots.delete(slot));
+            }
+        }, () => {
+            if (epoch === diagnosticEpoch) diagnosticRecord('request_failed', { requestId }, chat);
+        }).catch(() => {});
+        return result;
+    };
+    globalThis.fetch = diagnosticFetchWrapper;
+}
+async function copyDiagnostics() {
+    const report = diagnosticReport();
+    try { await navigator.clipboard.writeText(report); toastr.success('진단 기록을 복사했어요.', '🔞또또NSFW'); }
+    catch {
+        const box = document.getElementById('tns-diagnostic-log');
+        if (box) { box.value = report; box.focus(); box.select(); }
+        toastr.info('아래 기록이 선택됐어요. 직접 복사하거나 파일로 내려받아 주세요.', '🔞또또NSFW');
+    }
+}
+function downloadDiagnostics() {
+    const url = URL.createObjectURL(new Blob([diagnosticReport()], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = `ttotto-nsfw-diagnostics-${Date.now()}.json`;
+    link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 // ───────────────────────── 컨텍스트/설정 ─────────────────────────
 
@@ -774,6 +1165,7 @@ function maybeStealthArm() {
     if (score < threshold && meta.stealthCooldownReason !== 'manual') {
         score = stealthWindowDetail({ ignoreCooldown: true }).score;
     }
+    diagnosticRecord('local_decision', { score, threshold, reason: score < threshold ? 'below_local_threshold' : 'armed_locally' });
     if (score < threshold) return false;
     meta.autoArmed = true;
     meta.armSource = 'local';
@@ -825,6 +1217,7 @@ function maybeStealthRelease() {
     meta.stealthCooldownFrom = chat.length;
     meta.stealthCooldownReason = 'scene-ended';
     saveChatMeta();
+    diagnosticRecord('release_decision', { reason: 'current_scene_ended', ...diagnosticState() });
     toastr.info('현재 성적 행동이 끝난 것을 감지해 또또SFW로 인계해요.', '🔞또또NSFW');
     if (uiReady) updateUi();
     return true;
@@ -1837,7 +2230,7 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
 function prepareSceneInjection({ generationType, consumeBridge = true } = {}) {
     clearInjectedPrompt();
     try {
-        if (!ALLOWED_GENERATION_TYPES.has(generationType)) return;
+        if (!ALLOWED_GENERATION_TYPES.has(generationType)) { diagnosticRecord('injection_skipped', { reason: 'generation_type' }); return; }
         beginSceneGeneration(generationType);
         const settings = getSettings();
         const meta = getChatMeta();
@@ -1857,15 +2250,17 @@ function prepareSceneInjection({ generationType, consumeBridge = true } = {}) {
                 meta.bridgePending = false;
                 saveChatMeta();
             }
+            diagnosticRecord('injection_registered', { reason: 'bridge_only', chars: prompt.length, reportInstruction: false });
             console.debug(`${LOG_PREFIX} 수동 해제 브릿지 주입 (${prompt.length}자)`);
             return;
         }
-        if (!isSupervising()) return;
+        if (!isSupervising()) { diagnosticRecord('injection_skipped', { reason: 'not_supervising', ...diagnosticState() }); return; }
         maybeStealthRelease(); // 유저가 이미 일상 장면으로 전환했다면 이번 생성부터 바로 해제
         maybeStealthArm(); // 방금 보낸 유저 메시지까지 반영해 생성 직전에 감지
         if (settings.slowBurnEnabled && isFullyArmed()) startSlowBurnSessionIfNeeded();
         const prompt = buildInjection();
-        if (!prompt) return;
+        if (!prompt) { diagnosticRecord('injection_skipped', { reason: 'stealth_waiting', ...diagnosticState() }); return; }
+        diagnosticRecord('injection_registered', { reason: isFullyArmed() ? 'active' : 'monitor_or_bridge', chars: prompt.length, reportInstruction: prompt.includes('<scene_state>'), ...diagnosticState() });
         getContext().setExtensionPrompt(PROMPT_KEY, prompt, PROMPT_POSITION_IN_CHAT, 0, false, PROMPT_ROLE_SYSTEM);
         // 해제 브릿지는 딱 한 번만: 이번 생성에 실렸으면 플래그를 끈다 (미리보기는 소모하지 않음)
         if (consumeBridge && meta?.bridgePending && !isFullyArmed()) {
@@ -1881,6 +2276,7 @@ function prepareSceneInjection({ generationType, consumeBridge = true } = {}) {
 
 function onGenerationStarted(type, _options, dryRun) {
     if (dryRun) return;
+    diagnosticRecord('generation_started', { reason: normalizeGenerationType(type), ...diagnosticState() });
     beginSceneGeneration(type, true);
     const generationType = normalizeGenerationType(type);
     if (ALLOWED_GENERATION_TYPES.has(generationType)) {
@@ -2072,6 +2468,7 @@ async function runRefine({ manual = false } = {}) {
     refineTimer = null;
     queuedRefineTarget = null;
     lastAutoRefineTarget = captured;
+    diagnosticRecord('refine_started', { manual, message: getContext().chat.indexOf(captured.message), swipe: captured.swipe });
     refineRunning = true;
     refineFailure = null;
     const context = getContext();
@@ -2089,8 +2486,9 @@ async function runRefine({ manual = false } = {}) {
         if (refineAbortController?.signal.aborted || !runtimeActive || !isSupervising()
             || getContext().chatMetadata !== metadata || !getContext().chat?.includes(target)
             || assistantMessages().at(-1) !== target
-            || currentSwipeIndex(target) !== targetSwipe || recordBody(target.mes) !== targetText) return false;
+            || currentSwipeIndex(target) !== targetSwipe || recordBody(target.mes) !== targetText) { diagnosticRecord('refine_discarded', { reason: 'target_changed_or_disabled' }); return false; }
         const state = parseRefineResponse(response);
+        diagnosticRecord('refine_parsed', { characters: Object.keys(state.characters).length, heatPresent: state.heat !== null, heat: state.heat });
         const meta = getChatMeta();
         const refinedAt = Date.now();
         // 보정 결과를 최신 AI 메시지의 현재 스와이프에도 붙여야 반복 목록과 슬로우번 체류 턴이 정상 계산된다.
@@ -2103,9 +2501,11 @@ async function runRefine({ manual = false } = {}) {
         applyReportedHeat(state, target);
         if (settings.armMode !== 'manual') maybeStealthRelease();
         saveChatMeta();
+        diagnosticRecord('refine_saved', { message: getContext().chat.indexOf(target), swipe: targetSwipe, ...diagnosticCache(target), ...diagnosticState() });
         if (manual) toastr.success('보조 AI가 장면 상태를 다시 잡았어요.', '🔞또또NSFW');
         return true;
     } catch (error) {
+        diagnosticRecord('refine_failed', { reason: error?.name === 'AbortError' ? 'aborted' : 'request_or_parse_failed' });
         if (error?.name === 'AbortError') return false;
         refineFailure = { metadata, message: String(error?.message ?? error).slice(0, 180) };
         console.error(`${LOG_PREFIX} 보정 분석 실패`, error);
@@ -2123,14 +2523,15 @@ async function runRefine({ manual = false } = {}) {
 }
 
 function scheduleAutoRefine() {
-    if (!getSettings().autoRefine || !autoRefineNeeded()) return;
+    if (!getSettings().autoRefine || !autoRefineNeeded()) { diagnosticRecord('refine_skipped', { reason: !getSettings().autoRefine ? 'auto_refine_off' : 'not_needed', ...diagnosticState() }); return; }
     if (generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) return;
     const target = captureRefineTarget();
-    if (!target || sameRefineTarget(target, lastAutoRefineTarget)) return;
+    if (!target || sameRefineTarget(target, lastAutoRefineTarget)) { diagnosticRecord('refine_skipped', { reason: 'same_target_or_absent' }); return; }
     if (refineRunning) { queuedRefineTarget = target; return; }
     if (refineTimer && sameRefineTarget(target, queuedRefineTarget)) return;
     clearTimeout(refineTimer);
     queuedRefineTarget = target;
+    diagnosticRecord('refine_scheduled', { message: getContext().chat.indexOf(target.message), swipe: target.swipe });
     refineTimer = setTimeout(() => {
         refineTimer = null;
         const queued = queuedRefineTarget;
@@ -2170,7 +2571,8 @@ function persistChat() {
 
 // Apply the same temperature decision to collected and repaired reports.
 function applyReportedHeat(state, message) {
-    if (!isSupervising()) return;
+    if (!isSupervising()) { diagnosticRecord('heat_decision', { reason: 'not_supervising' }); return; }
+    const wasArmed = Boolean(getChatMeta(false)?.autoArmed);
     const settings = getSettings();
     const meta = getChatMeta(false);
     const hasCurrentNsfwSignal = settings.armMode === 'stealth'
@@ -2217,22 +2619,37 @@ function applyReportedHeat(state, message) {
             saveChatMeta();
         }
     }
+    const heat = state?.heat;
+    const reason = settings.armMode === 'manual' ? 'manual_mode'
+        : heat === null || heat === undefined ? (snapshotMatchesMessage(message) && snapshotForMessage(message)?.state?.heat != null ? 'cached_report_no_new_decision' : 'missing_heat')
+        : !wasArmed && meta.autoArmed ? 'armed_by_heat'
+        : wasArmed && !meta.autoArmed ? 'disarmed_by_heat'
+        : !wasArmed && heat >= AUTO_ARM_ON ? 'routine_suppressed'
+        : !wasArmed ? 'below_on_threshold'
+        : heat <= AUTO_ARM_OFF ? 'protected_or_local_signal' : 'remains_active';
+    diagnosticRecord('heat_decision', { reason, message: getContext().chat.indexOf(message), swipe: currentSwipeIndex(message),
+        reportedHeatPresent: heat !== null && heat !== undefined,
+        ...(heat !== null && heat !== undefined ? { reportedHeat: heat } : {}),
+        wasArmed, nowArmed: Boolean(meta.autoArmed), onThreshold: AUTO_ARM_ON, offThreshold: AUTO_ARM_OFF });
 }
 
 function handleIncomingMessage(index) {
     const settings = getSettings();
-    if (!settings.enabled || !settings.adultConfirmed) return;
+    if (!settings.enabled || !settings.adultConfirmed) { diagnosticRecord('collection_skipped', { reason: 'disabled_or_unconfirmed' }); return; }
     const meta = getChatMeta(false);
-    if (!meta?.enabled) return;
+    if (!meta?.enabled) { diagnosticRecord('collection_skipped', { reason: 'chat_disabled' }); return; }
 
     const message = messageByIndex(index);
     if (!message || message.is_user || message.is_system) return;
-    if (isPendingAssistant(message) || holdsRewriteGeneration()) return;
+    if (isPendingAssistant(message) || holdsRewriteGeneration()) { diagnosticRecord('collection_skipped', { reason: 'pending_generation' }); return; }
+    index = getContext().chat.indexOf(message);
+    diagnosticResponse(message, index);
     lastCompletedAssistant = { metadata: getContext().chatMetadata, message };
 
     // 첫 감지 답변도 올바른 담당으로 수집한다. 본문을 지우기 전에 판단한다.
     maybeStealthArm();
     const { changed, found, state } = harvestMessage(message);
+    diagnosticRecord('collection_result', { message: index, swipe: currentSwipeIndex(message), found, wrote: Boolean(state), stripped: changed, ...diagnosticCache(message) });
     if (found) {
         if (!stateCompletenessIssues(state ?? snapshotForMessage(message)?.state, settings).length) refineFailure = null;
         // 새 스냅샷이 수동 보정보다 최신이므로 수동 보정은 자연히 밀려남
@@ -2257,6 +2674,8 @@ function handleIncomingMessage(index) {
         rerenderMessage(index, message);
         persistChat();
     }
+    diagnosticTrackBody(message, index, 'after_collection');
+    if (snapshotForMessage(message)?.state && !snapshotMatchesMessage(message)) diagnosticRecord('cache_invalidated', { reason: 'body_signature_mismatch', message: index, ...diagnosticCache(message) });
     const completenessState = state ?? snapshotForMessage(message)?.state ?? null;
     const completenessIssues = found ? stateCompletenessIssues(completenessState, settings) : [];
     if (!found || completenessIssues.length) {
@@ -2273,14 +2692,18 @@ function element(id) {
     return document.getElementById(id);
 }
 
+let activeUiTab = 'state';
 function setTab(tab) {
+    activeUiTab = tab;
+    const box = element('tns-popup-box');
+    if (box) box.style.setProperty('max-width', tab === 'diagnostics' ? '860px' : '460px', 'important');
     document.querySelectorAll('#ttotto-nsfw-settings [data-tns-tab]').forEach((button) => {
         const active = button.dataset.tnsTab === tab;
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-selected', String(active));
     });
     // hidden 속성만으로는 팝업/테마 CSS와 충돌할 수 있어 인라인 스타일로도 강제한다
-    const panels = { state: element('tns-panel-state'), settings: element('tns-panel-settings') };
+    const panels = { state: element('tns-panel-state'), diagnostics: element('tns-panel-diagnostics'), settings: element('tns-panel-settings') };
     for (const [name, panel] of Object.entries(panels)) {
         if (!panel) continue;
         const active = name === tab;
@@ -2722,6 +3145,7 @@ function refreshPromptSize(prompt) {
 }
 
 function updateUi() {
+    syncDiagnosticFetch();
     if (!uiReady) return;
     try {
         const settings = getSettings();
@@ -2733,6 +3157,8 @@ function updateUi() {
             popupDeveloperTitle.textContent = settings.developerMode ? '🔞 또또NSFW 🧪' : '🔞 또또NSFW';
         }
 
+        element('tns-diagnostics-enabled').checked = Boolean(settings.diagnosticsEnabled);
+        renderDiagnostics();
         element('tns-enabled').checked = Boolean(settings.enabled);
         element('tns-adult-confirmed').checked = Boolean(settings.adultConfirmed);
         element('tns-chat-enabled').checked = Boolean(meta?.enabled);
@@ -2824,6 +3250,14 @@ function bindSetting(id, key, parser = (value) => value, after = null) {
 }
 
 function bindUi() {
+    bindSetting('tns-diagnostics-enabled', 'diagnosticsEnabled', Boolean, () => {
+        diagnosticRecord('recording_started', diagnosticState());
+        renderDiagnostics();
+    });
+    element('tns-diagnostic-copy').addEventListener('click', () => { void copyDiagnostics(); });
+    element('tns-diagnostic-download').addEventListener('click', downloadDiagnostics);
+    element('tns-diagnostic-clear').addEventListener('click', clearDiagnostics);
+
     // 탭 클릭은 루트 위임으로 — 패널이 팝업으로 이동해도, 어떤 환경에서도 확실히 잡힌다
     const root = document.getElementById('ttotto-nsfw-settings');
     element('tns-developer-title').addEventListener('click', handleDeveloperTitleTap);
@@ -3158,6 +3592,7 @@ function openPopup() {
     if (drawerContent) drawerContent.style.setProperty('display', 'block', 'important');
     overlay.style.cssText = `display:flex !important; ${TNS_OVERLAY_BASE_CSS}`;
     box.style.cssText = TNS_POPUP_BOX_CSS;
+    setTab(activeUiTab);
     const header = box.querySelector('.tns-popup-header');
     if (header) header.style.cssText = 'display:flex !important; align-items:center !important; justify-content:space-between !important; gap:8px !important; padding:10px 14px !important; border-bottom:1px solid rgba(128,128,128,0.25) !important; flex-shrink:0 !important;';
     const body = document.getElementById('tns-popup-body');
@@ -3250,6 +3685,7 @@ async function initializeUi() {
 
 function registerEvents() {
     syncStateTagDisplayGuard();
+    syncDiagnosticFetch();
     if (eventsRegistered) return;
     const context = getContext();
     const events = getEventTypes(context);
@@ -3262,23 +3698,29 @@ function registerEvents() {
 
     listen('GENERATION_STARTED', onGenerationStarted);
     listen('MESSAGE_RECEIVED', (index) => {
+        diagnosticRecord('message_received', { message: Number(index) });
+        diagnosticTrackBody(messageByIndex(index), Number(index), 'message_received');
         finishReceivedGeneration();
         handleIncomingMessage(index);
     });
     // 스와이프 보험: ST 버전에 따라 스와이프 생성 후 MESSAGE_RECEIVED가 안 오는 경우를 이중으로 잡는다
     listen('GENERATION_ENDED', (type) => {
+        diagnosticRecord('generation_ended');
         if (finishSceneGeneration(type)) handleIncomingMessage();
     });
     listen('GENERATION_STOPPED', () => {
+        diagnosticRecord('generation_stopped');
         rewriteGeneration = null;
         generationEvents = [];
         handleIncomingMessage();
     });
-    listen('CHARACTER_MESSAGE_RENDERED', (index) => handleIncomingMessage(index));
-    listen('MESSAGE_SWIPED', (index) => handleIncomingMessage(index));
-    listen('MESSAGE_EDITED', () => updateUi());
+    listen('CHARACTER_MESSAGE_RENDERED', (index) => { diagnosticRecord('message_rendered', { message: Number(index) }); handleIncomingMessage(index); });
+    listen('MESSAGE_SWIPED', (index) => { diagnosticRecord('message_swiped', { message: Number(index) }); handleIncomingMessage(index); });
+    listen('MESSAGE_EDITED', (index) => { diagnosticRecord('message_edited', { message: Number(index) }); diagnosticTrackBody(messageByIndex(index), Number(index), 'message_edited'); updateUi(); });
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
+        resetDiagnosticEvidence();
+        diagnosticRecord('chat_changed');
         queuedRefineTarget = null;
         lastAutoRefineTarget = null;
         refineFailure = null;
@@ -3350,6 +3792,7 @@ export function onEnable() {
 
 export function onDisable() {
     runtimeActive = false;
+    stopDiagnosticFetch();
     stopStateTagDisplayGuard();
     queuedRefineTarget = null;
     refineFailure = null;
@@ -3370,6 +3813,8 @@ export function onDisable() {
 }
 
 export function onClean() {
+    stopDiagnosticFetch();
+    clearDiagnostics();
     stopStateTagDisplayGuard();
     closePopup();
     removeWandButton();
