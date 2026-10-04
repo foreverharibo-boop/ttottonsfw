@@ -167,7 +167,7 @@ test('unrelated ordinary scenes still honor two-message cold streak',()=>{
 test('thresholds, UI, version and heat instructions agree',()=>{
     assert.match(index,/high: 3, normal: 4, low: 7/);
     assert.match(index,/Ordinary bathing, showering/);
-    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.15');
+    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.16');
     assert.match(fs.readFileSync(new URL('settings.html',root),'utf8'),/민감 3점 · 보통 4점 · 둔감 7점/);
 });
 
@@ -249,4 +249,72 @@ test('washing plus vocal sounds without intimacy remains excluded',()=>{
 });
 test('denied kissing does not legitimize ordinary bath sounds',()=>{
     assert.equal(scoreScene('She showered. She did not kiss him deeply. She moaned under warm water.').score,0);
+});
+
+// Public regressions use minimal everyday examples rather than private chat transcripts.
+const everydayKorean = [
+    '폰만 보지 말고 빨리 내려서 트렁크 문짝이나 좀 열어!',
+    '폰만 보지말고 빨리 내려.',
+    '그녀를 보지도 않고 팔을 문질렀다.',
+    '먹어 보지 못한 음식을 입술을 핥으며 살폈다.',
+    '그는 자지 않고 손을 문질렀다.',
+    '그는 바지를 입은 채 자지 않고 버텼고, 바지 주름은 팽팽했다.',
+    '그는 자지러지게 웃으며 손을 문질렀다.',
+    '가슴이 철렁해서 빨리 일어났다.',
+    '가슴 앞에 빨간 리본을 달았다.',
+    '가슴 앞에 빨래 바구니를 들었다.',
+    '가슴에 명찰을 단 주무관이 서 있었다.',
+    '가슴에 명찰을 단 문지기가 서 있었다.',
+    '가슴에 달린 이름표를 빤히 봤다.',
+    '3리터짜리 액체 세제에 치약 묶음, 변기 솔까지 쑤셔 넣어 팽팽하게 부풀어 오른 종이 가방 손잡이를 그가 한 손으로 낚아채듯 가볍게 들어 올렸다.',
+    '짐을 가방에 쑤셔 넣었다.',
+    '가슴 앞에서 봉투를 들고 물건을 쑤셔 넣었다.',
+    '카드를 단말기에 삽입했다.',
+    '벽에 못을 박아 넣었다.',
+    '그는 시간을 달라고 사정했다.',
+    '그녀의 가슴 앞을 팔로 막아 급정거에 대비했다.',
+];
+for (const text of everydayKorean) test(`everyday Korean is not a sexual signal: ${text}`,()=>{
+    assert.equal(scoreScene(text).score,0,JSON.stringify(scoreScene(text)));
+    assert.deepEqual(plain(inline(text)),scoreScene(text));
+});
+const validKoreanContact = [
+    '유두를 빨았다.',
+    '유두를 빠는 행동.',
+    '가슴을 주무르고 있었다.',
+    '성기를 문질렀다.',
+    '보지를 애무했다.',
+    '자지를 애무했다.',
+    '질 안에 삽입했다.',
+    '성기를 밀어 넣었다.',
+    '성기를 쑤셔 넣었다.',
+    '애무하며 삽입했다.',
+    '유두만을 빨았다.',
+    '성기에는 애무를 이어갔다.',
+];
+for (const text of validKoreanContact) test(`grounded Korean contact still detected: ${text}`,()=>{
+    assert.ok(scoreScene(text).score>=4,JSON.stringify(scoreScene(text)));
+    assert.deepEqual(plain(inline(text)),scoreScene(text));
+});
+test('ordinary objects do not cancel a separate real signal',()=>{
+    assert.equal(scoreScene('짐을 가방에 쑤셔 넣었다. 키스가 깊어졌다. 흐응.').score,4);
+    assert.ok(scoreScene('폰만 보지 말고 빨리 내려. 유두를 빨았다.').score>=4);
+});
+for (const mode of ['stealth','auto']) for (const sensitivity of ['high','normal','low']) {
+    test(`ordinary Korean does not activate injection or auxiliary AI: ${mode}/${sensitivity}`,()=>{
+        const r=runtime({mode,sensitivity,autoRefine:true,chat:[
+            message(everydayKorean[0],true), message(everydayKorean[13]),
+        ]});
+        assert.equal(r.api.stealthWindowDetail().score,0);
+        r.api.handleIncomingMessage(1);
+        assert.equal(r.meta.autoArmed,false);
+        assert.equal(r.api.isFullyArmed(),false);
+        assert.equal(r.env.ttottoNsfwSceneBridge.sync(),false);
+        r.noCalls();r.noForeignChanges();
+    });
+}
+test('Korean kissing and vocal signals still accumulate across messages',()=>{
+    const r=runtime({chat:[message('키스가 깊어졌다.'),message('흐응.',true)]});
+    assert.equal(r.api.stealthWindowDetail().score,4);
+    assert.equal(r.api.maybeStealthArm(),true);
 });

@@ -6,8 +6,18 @@ const EN_ORAL_MOTION = /\b(?:swirl(?:s|ed|ing)?|press(?:es|ed|ing)?|drag(?:s|ged
 const EN_HAND = String.raw`\b(?:finger(?:s|ed|ing)?|digits?|hands?)\b`;
 const EN_INTIMATE = String.raw`\b(?:wetness|pussy|vagina|canal|clit(?:oris)?|nipples?|genitals?)\b`;
 const EN_MOTION = /\b(?:sink(?:s|ing)?|sank|buried|insert(?:s|ed|ing)?|pump(?:s|ed|ing)?|stretch(?:es|ed|ing)?|rub(?:s|bed|bing)?|strok(?:e|es|ed|ing)|penetrat(?:e|es|ed|ing)|fuck(?:s|ed|ing)?)\b/i;
-const KO_BODY = String.raw`(?:가슴|유두|젖꼭지|성기|클리토리스|음핵|음순|보지|자지|애액|젖은\s*(?:구멍|속살))`;
-const KO_TOUCH = String.raw`(?:핥|빨|애무|주무|움켜|문지|문질|쑤셔|쑤시|쑤셔대|비벼|비비|비볐|삽입|밀어\s*넣|박아\s*넣|잠겨|파묻|마디.{0,20}잠)`;
+// 한국어에는 영문식 \b 경계가 통하지 않는다. 명사와 조사 경계를 확인하고
+// '보지 말고/자지 않고' 같은 동사, '자지러지다/성기게' 같은 다른 단어를 제외한다.
+function koreanNoun(words) {
+    return String.raw`(?<![가-힣A-Za-z0-9_])(?:${words})(?=$|[^가-힣A-Za-z0-9_]|(?:을|를|이|가|은|는|에|엔|에서|에게|의|도|만|로|으로|와|과|랑|부터|까지|처럼|보다|조차|마저|마다){1,3}(?=$|[^가-힣A-Za-z0-9_]))`;
+}
+const KO_HOMOGRAPHS = String.raw`(?:보지|자지)(?!(?:는|도|만)?\s*(?:말|않|못|마(?:라|요)?(?:$|[\s.!?])))`;
+const KO_BODY = koreanNoun(String.raw`가슴|유두|젖꼭지|성기|클리토리스|음핵|음순|${KO_HOMOGRAPHS}|애액|젖은\s*(?:구멍|속살)`);
+// '빨리/빨간/빨래'를 빨다의 활용형으로 세지 않는다.
+const KO_TOUCH = String.raw`(?:핥|빨(?=[아았고며면던듯다지]|$|[^가-힣])|빤(?=[다지듯]|$|[^가-힣])|빠는|애무|주무(?=[르른를름])|움켜|문지(?=[르른를름])|문질|쑤셔|쑤시|쑤셔대|비벼|비비|비볐|삽입|밀어\s*넣|박아\s*넣|잠겨|파묻|마디.{0,20}잠)`;
+const KO_AMBIGUOUS_ACTION = /삽입|박아\s*넣|쑤셔|쑤시|밀어\s*넣|잠겨|파묻|사정/;
+const KO_INTIMATE_CONTEXT = new RegExp(koreanNoun(String.raw`성기|클리토리스|음핵|음순|${KO_HOMOGRAPHS}|애액|질|항문|정액|발기|젖은\s*(?:구멍|속살)`)
+    + String.raw`|성적\s*(?:쾌감|자극|접촉|흥분)|애무|자위|성교|오르가즘`, 'i');
 const NEAR = String.raw`[^.!?。！？\n]{0,180}?`;
 function nearby(left, right, span = NEAR) {
     return new RegExp(`(?:${left})${span}(?:${right})|(?:${right})${span}(?:${left})`, 'gi');
@@ -16,7 +26,7 @@ function nearby(left, right, span = NEAR) {
 // 의복 마찰은 운동/세탁에도 등장한다. 같은 문단의 구체적인 성적 신체 반응이 있어야 인정한다.
 const EN_GENITAL_RESPONSE = nearby(String.raw`\b(?:cock|dick|penis|erection)\b`,
     String.raw`\b(?:hard|stiff|rigid|erect|throb(?:s|bed|bing)?|aching|aroused)\b`);
-const KO_GENITAL_RESPONSE = nearby(String.raw`(?:성기|자지|발기)`,
+const KO_GENITAL_RESPONSE = nearby(koreanNoun(String.raw`성기|자지(?!(?:는|도|만)?\s*(?:말|않|못))|발기`),
     String.raw`(?:발기|단단|팽팽|굳|빳빳|뻣뻣|욱신|발딱|꼿꼿)`, String.raw`[^.!?。！？\n]{0,80}?`);
 
 // 노출/젖은 몸/탈의는 위생 장면에서도 흔하다. 신체+동사의 일치만으로
@@ -84,6 +94,10 @@ export function scoreScene(text, customKeywords = '') {
         while (count < 3 && (match = re.exec(source)) !== null) {
             const sentence = sentenceAt(source, match.index, re.lastIndex);
             if (NOT_AN_ACT.test(sentence)) continue;
+            // '물건을 봉투에 쑤셔 넣다/카드를 삽입하다/못을 박아 넣다/사정하다'는
+            // 동사만으로 성적 행위가 아니다. 그 행동의 문장 안에 별도 근거가 필요하다.
+            if ((label === '현재 명시적 행위' || label === '한국어 직접 접촉')
+                && KO_AMBIGUOUS_ACTION.test(match[0]) && !KO_INTIMATE_CONTEXT.test(sentence)) continue;
             if (NONSEXUAL.test(sentence) && !SEXUAL_ACTION.test(match[0])) continue;
             const paragraph = paragraphAt(source, match.index, re.lastIndex);
             const romanticContact = label === '성적 접촉 분위기' && hasCurrentKiss(match[0]);
