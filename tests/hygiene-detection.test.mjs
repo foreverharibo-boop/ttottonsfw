@@ -167,7 +167,7 @@ test('unrelated ordinary scenes still honor two-message cold streak',()=>{
 test('thresholds, UI, version and heat instructions agree',()=>{
     assert.match(index,/high: 3, normal: 4, low: 7/);
     assert.match(index,/Ordinary bathing, showering/);
-    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.16');
+    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.17');
     assert.match(fs.readFileSync(new URL('settings.html',root),'utf8'),/민감 3점 · 보통 4점 · 둔감 7점/);
 });
 
@@ -317,4 +317,58 @@ test('Korean kissing and vocal signals still accumulate across messages',()=>{
     const r=runtime({chat:[message('키스가 깊어졌다.'),message('흐응.',true)]});
     assert.equal(r.api.stealthWindowDetail().score,4);
     assert.equal(r.api.maybeStealthArm(),true);
+});
+
+for (let heat=0;heat<=10;heat++) test(`temperature mode starts at six: reported heat ${heat}`,()=>{
+    const r=runtime({mode:'auto', chat:[message(`Current scene.<scene_state>{"heat":${heat}}</scene_state>`)]});
+    r.api.handleIncomingMessage(0);
+    assert.equal(r.meta.autoArmed,heat>=6);
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),heat>=6);
+    if(heat>=6) assert.equal(r.meta.armSource,'heat');
+    r.noCalls();r.noForeignChanges();
+});
+for(const sensitivity of ['high','normal','low']) test(`local score cannot bypass temperature mode: ${sensitivity}`,()=>{
+    const r=runtime({mode:'auto',sensitivity,autoRefine:true,chat:[
+        message('She kissed deeply. She moaned.',true),
+        message('She kissed deeply. She moaned.<scene_state>{"heat":4}</scene_state>'),
+    ]});
+    assert.ok(r.api.stealthWindowDetail().score>=7);
+    assert.equal(r.api.maybeStealthArm(),false);
+    r.api.handleIncomingMessage(1);
+    assert.equal(r.api.isFullyArmed(),false);
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),false);
+    r.noCalls();r.noForeignChanges();
+});
+test('missing AI temperature does not fall back to local activation in auto mode',()=>{
+    const r=runtime({mode:'auto',autoRefine:true,chat:[message('She kissed deeply. She moaned.')]});
+    r.api.handleIncomingMessage(0);
+    assert.equal(r.api.isFullyArmed(),false);
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),false);
+    r.noCalls();
+});
+test('ordinary conversation with low heat and custom matches stays in monitor mode',()=>{
+    const r=runtime({mode:'auto',autoRefine:true,chat:[message('질투하며 문자를 보냈다. 어깨를 짚어 길을 비켜줬다.<scene_state>{"heat":2}</scene_state>')]});
+    r.context.extensionSettings['ttotto-nsfw'].stealthKeywords='질투,문자,어깨';
+    r.api.handleIncomingMessage(0);
+    assert.equal(r.api.isFullyArmed(),false);
+    r.noCalls();r.noForeignChanges();
+});
+test('low reported heat releases auto mode despite remaining local signals',()=>{
+    const r=runtime({mode:'auto',armed:true,chat:[message('She kissed deeply. She moaned.<scene_state>{"heat":2}</scene_state>')]});
+    r.api.handleIncomingMessage(0);
+    assert.equal(r.meta.autoArmed,false);
+    assert.equal(r.api.isFullyArmed(),false);
+    // The existing one-response wind-down bridge may still participate after release.
+    r.env.ttottoNsfwSceneBridge.sync();
+    assert.equal(r.meta.autoArmed,false);
+});
+test('temperature threshold change preserves an intentional slow-burn lock',()=>{
+    const r=runtime({mode:'auto',armed:true,chat:[message('They spoke quietly.<scene_state>{"heat":0}</scene_state>')]});
+    r.context.extensionSettings['ttotto-nsfw'].slowBurnEnabled=true;
+    r.meta.slowBurnSessionActive=true;
+    r.meta.slowBurnStageOverride=1;
+    r.meta.slowBurnLocked=true;
+    r.api.handleIncomingMessage(0);
+    assert.equal(r.meta.autoArmed,true);
+    assert.equal(r.meta.slowBurnLocked,true);
 });

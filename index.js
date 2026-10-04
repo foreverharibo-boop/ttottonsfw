@@ -158,7 +158,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.16';
+const EXTENSION_VERSION = '0.13.17';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -223,7 +223,7 @@ const BRIDGE_LINES = [
 const SAFETY_LIMIT = 1000000;
 
 // 온도 자동 무장 히스테리시스: 이 온도 이상이면 개입 시작, 이 온도 이하면 해제
-const AUTO_ARM_ON = 5;
+const AUTO_ARM_ON = 6;
 const AUTO_ARM_OFF = 2;
 
 // 스텔스 모드 로컬 감지: 최근 메시지에서 NSFW 신호를 점수화 (주입·호출 없음)
@@ -235,11 +235,14 @@ const REFINE_TOTAL_CHAR_LIMIT = 60000;
 
 const HEAT_SCALE_LINES = Object.freeze([
     'HEAT SCALE (judge the scene facts at the END of the response, not isolated words or discussion):',
+    'Heat measures current sexual activity, not romantic interest, emotional intensity, jealousy, possessiveness, banter, embarrassment, attractiveness, or narrative tension. Ordinary conversation, errands, texting, helpful/protective gestures, and incidental or practical touch stay at 0-1; attraction or flirting alone stays at 2 or below.',
+    'Do not infer sexual activity from a genre label, NSFW permission, character preferences, OOC instructions, planning blocks, past activity, or a possible next scene. Rate only what is actually happening in the current scene. When evidence is ambiguous, use the lower supported heat; do not invent sexual intent.',
     'Ordinary bathing, showering, washing, drying, changing clothes, nudity, wet skin, or medical care are NONSEXUAL unless actual sexual contact is occurring. Never raise heat merely because bodies or intimate anatomy are described.',
     'Pain sounds, cold shivers, exertion, and embarrassment are not sexual arousal. Discussion, hypothetical/denied actions, or an earlier intimate scene are not current sexual activity.',
     '- 0-1: ordinary/nonsexual; 2: mild flirting or romantic charge without sustained sexual contact.',
-    '- 3-4: kissing, close body contact, or clearly rising sexual tension.',
-    '- 5-6: unmistakable sexual touching/foreplay; this is the active-supervision threshold.',
+    '- 3-4: actual romantic kissing or intentional intimate contact; ordinary proximity or supportive touch does not qualify.',
+    '- 5: clearly sexual tension or developing intimacy, but sustained, unambiguous sexual touching/foreplay is not established yet; do not activate supervision.',
+    '- 6: sustained, unambiguous sexual touching/foreplay is actually occurring in the current scene; this is the active-supervision threshold. Arousal alone or imagined/inferred desire is insufficient.',
     '- 7-8: sustained explicit sexual activity or intensifying stimulation; 9: climax is imminent; 10: peak/climax or immediate conclusion.',
 ]);
 const DEFAULT_SETTINGS = Object.freeze({
@@ -757,10 +760,10 @@ function forceToggleArm() {
     updateUi();
 }
 
-// 두 자동 모드 모두 본문 감지를 사용한다. 온도 태그만으로 진입을 제한하지 않는다.
+// 단어 점수에 의한 시작은 스텔스 모드 전용. 온도 자동의 기준을 우회하지 않는다.
 function maybeStealthArm() {
     const settings = getSettings();
-    if (settings.armMode === 'manual' || !isSupervising()) return false;
+    if (settings.armMode !== 'stealth' || !isSupervising()) return false;
     const meta = getChatMeta(false);
     if (!meta || meta.autoArmed) return false;
     const threshold = STEALTH_THRESHOLDS[settings.stealthSensitivity] ?? STEALTH_THRESHOLDS.normal;
@@ -2106,10 +2109,11 @@ function handleIncomingMessage(index) {
         saveChatMeta();
         toastr.success(`“${targetProgress.target}” ${targetProgress.requiredTurns}회 진행을 채웠어요. 다음 AI 답변부터는 전환할 수 있어요.`, '🔞또또NSFW');
     }
-    // 스텔스/온도 자동 모두 본문을 확인한다. 낮은 보고 온도는 본문 신호를 취소할 수 없다.
+    // 스텔스만 본문 점수로 시작/유지한다. 온도 자동은 AI의 온도 보고를 따른다.
     maybeStealthArm();
-    const hasCurrentNsfwSignal = stealthWindowDetail({ ignoreCooldown: true }).score >= STEALTH_THRESHOLDS.normal;
-    // 온도 자동 무장/해제 (히스테리시스: 켜짐 5↑, 꺼짐 2↓) — auto·stealth 공통 (해제는 온도 기준)
+    const hasCurrentNsfwSignal = settings.armMode === 'stealth'
+        && stealthWindowDetail({ ignoreCooldown: true }).score >= STEALTH_THRESHOLDS.normal;
+    // 온도 무장/해제 (히스테리시스: 켜짐 6↑, 꺼짐 2↓). 수동/슬로우번 제어는 유지.
     if (state?.heat !== null && state?.heat !== undefined && settings.armMode !== 'manual') {
         if (!meta.autoArmed && state.heat >= AUTO_ARM_ON
             && !nsfwScoreDetail(stripStateTag(message.mes)).routineOnly) {
@@ -2658,8 +2662,10 @@ function updateUi() {
         element('tns-exit-bridge').checked = Boolean(settings.exitBridge);
         element('tns-arm-mode').value = String(settings.armMode);
         element('tns-stealth-sensitivity').value = String(settings.stealthSensitivity);
+        element('tns-stealth-sensitivity').disabled = settings.armMode !== 'stealth';
         const keywordsInput = element('tns-stealth-keywords');
         if (document.activeElement !== keywordsInput) keywordsInput.value = String(settings.stealthKeywords ?? '');
+        keywordsInput.disabled = settings.armMode !== 'stealth';
         element('tns-next-hints').checked = Boolean(settings.nextBeatHints);
         element('tns-dialogue-guard').checked = Boolean(settings.dialogueBeatGuard);
         element('tns-dialogue-window').value = String(settings.dialogueWindow);
