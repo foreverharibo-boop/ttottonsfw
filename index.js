@@ -158,7 +158,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.17';
+const EXTENSION_VERSION = '0.13.18';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1071,7 +1071,9 @@ function harvestMessage(message) {
         store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature };
         found = true;
     }
-    const clean = (text) => isFullyArmed() ? recordBody(text) : stripStateTag(text);
+    // SFW must be able to harvest its own report after a same-response release.
+    // Read compatible facts above, but strip only our own tag.
+    const clean = (text) => stripStateTag(text);
     const strippedMes = clean(message.mes);
     if (strippedMes !== message.mes) {
         message.mes = strippedMes;
@@ -1766,6 +1768,7 @@ function normalizeGenerationType(type) {
 
 // SFW가 먼저 실행되더라도 NSFW 감지/해제를 끝낸 뒤 같은 담당 상태를 읽는다.
 // 자체 판단으로 NSFW 설정을 변경하거나 보조 AI를 별도로 호출하지 않는다.
+let sceneBridgeSyncing = false;
 globalThis.ttottoNsfwSceneBridge = Object.freeze({
     beginGeneration(type) { beginSceneGeneration(type); },
     collect(message) {
@@ -1778,6 +1781,17 @@ globalThis.ttottoNsfwSceneBridge = Object.freeze({
         const meta = getChatMeta();
         if (!runtimeActive || !settings.enabled || !settings.adultConfirmed || !meta) return false;
         if (meta.enabled) {
+            // SFW can receive the completed response first. Consume the current
+            // report before returning ownership; never infer ownership from SFW scores.
+            const message = assistantMessages().at(-1);
+            if (!sceneBridgeSyncing && message && !isPendingAssistant(message)
+                && !holdsRewriteGeneration()
+                && !generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))
+                && parseStateFromText(message.mes)) {
+                sceneBridgeSyncing = true;
+                try { handleIncomingMessage(getContext().chat.indexOf(message)); }
+                finally { sceneBridgeSyncing = false; }
+            }
             maybeStealthRelease();
             maybeStealthArm();
         }
@@ -2361,7 +2375,9 @@ function renderStatePanel() {
     renderCardLinkPanel(settings);
     const sourceLabel = { tag: '응답 태그에서 추적됨', 'ai-refine': '보조 AI 보정 결과', manual: '수동 수정됨', none: '아직 기록 없음' }[source] ?? source;
     const incomplete = isFullyArmed() && stateCompletenessIssues(state, settings).length > 0;
-    element('tns-state-source').textContent = refineRunning ? '보조 AI 분석 중…'
+    element('tns-state-source').textContent = isSupervising() && settings.armMode === 'auto' && !isFullyArmed()
+        ? (armMeta?.bridgePending ? '일상 복귀 중 · 종료 브릿지 대기' : '온도 감시 중 · NSFW 개입·장면 수집 대기')
+        : refineRunning ? '보조 AI 분석 중…'
         : refineFailure?.metadata === getContext().chatMetadata ? `상태 보정 실패: ${refineFailure.message}`
         : incomplete ? `전체 장면 기록 미완성 · ${settings.autoRefine ? '자동 보정 사용 중' : '자동 보정 꺼짐'}`
         : sourceLabel;

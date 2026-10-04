@@ -167,7 +167,7 @@ test('unrelated ordinary scenes still honor two-message cold streak',()=>{
 test('thresholds, UI, version and heat instructions agree',()=>{
     assert.match(index,/high: 3, normal: 4, low: 7/);
     assert.match(index,/Ordinary bathing, showering/);
-    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.17');
+    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.18');
     assert.match(fs.readFileSync(new URL('settings.html',root),'utf8'),/민감 3점 · 보통 4점 · 둔감 7점/);
 });
 
@@ -361,6 +361,30 @@ test('low reported heat releases auto mode despite remaining local signals',()=>
     // The existing one-response wind-down bridge may still participate after release.
     r.env.ttottoNsfwSceneBridge.sync();
     assert.equal(r.meta.autoArmed,false);
+});
+test('owner bridge consumes a completed heat report before a companion reads ownership',()=>{
+    const r=runtime({mode:'auto',chat:[message('Current reply.<scene_state>{"heat":6}</scene_state>')]});
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),true);
+    assert.equal(r.api.isFullyArmed(),true);
+    assert.equal(r.context.chat[0].extra.ttottoNsfw.swipes['0'].state.heat,6);
+    r.noForeignChanges();
+});
+test('same-response release leaves the companion SFW report intact',()=>{
+    const tag='<sfw_scene>{"location":"Home","intensity":1}</sfw_scene>';
+    const r=runtime({mode:'auto',armed:true,chat:[message('We returned home.<scene_state>{"heat":0}</scene_state>'+tag)]});
+    r.api.handleIncomingMessage(0);
+    assert.equal(r.api.isFullyArmed(),false);
+    assert.ok(r.context.chat[0].mes.includes(tag));
+    assert.ok(!r.context.chat[0].mes.includes('<scene_state>'));
+    r.noForeignChanges();
+});
+test('owner bridge does not consume a report during main generation',()=>{
+    const r=runtime({mode:'auto',chat:[message('Current reply.<scene_state>{"heat":6}</scene_state>')]});
+    r.api.beginSceneGeneration('normal',true);
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),false);
+    assert.equal(r.api.isFullyArmed(),false);
+    assert.ok(r.context.chat[0].mes.includes('<scene_state>'));
+    r.noCalls();
 });
 test('temperature threshold change preserves an intentional slow-burn lock',()=>{
     const r=runtime({mode:'auto',armed:true,chat:[message('They spoke quietly.<scene_state>{"heat":0}</scene_state>')]});
