@@ -158,7 +158,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.23';
+const EXTENSION_VERSION = '0.13.24';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1392,12 +1392,36 @@ function stripCompatibleSfwTag(text) {
         .trimEnd();
 }
 
+// Compare narrative bodies independently of either extension's machine report.
+// Keep substantive edits significant; normalize only known report wrappers,
+// line endings, trailing spaces, and the established appended-translation marker.
+function canonicalSceneBody(text) {
+    const clean = String(text ?? '')
+        .replace(/(<\/(?:scene_state|sfw_scene)>[ \t]*(?:\r?\n[ \t]*```)?)[ \t\r\n]+(?:no\s+changes?|unchanged)[ \t]*[.!]?[ \t]*$/i, '$1')
+        .replace(/```(?:json)?\s*<(scene_state|sfw_scene)\b[^>]*>[\s\S]*?<\/\1>\s*```/gi, '')
+        .replace(/<(scene_state|sfw_scene)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+        .replace(/```(?:json)?\s*<(?:scene_state|sfw_scene)\b[^>]*>[\s\S]*$/gi, '')
+        .replace(/<(?:scene_state|sfw_scene)\b[^>]*>[\s\S]*$/gi, '')
+        .replace(/<\/(?:scene_state|sfw_scene)>\s*```/gi, '')
+        .replace(/<\/(?:scene_state|sfw_scene)>/gi, '');
+    const marker = clean.search(/\r?\n\s*번역문\s*\r?\n/i);
+    return (marker >= 0 ? clean.slice(0, marker) : clean)
+        .replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trimEnd();
+}
+
 function recordBody(text) {
-    return stripCompatibleSfwTag(stripStateTag(text));
+    return canonicalSceneBody(text);
 }
 
 function messageStateSignature(message) {
-    const text = recordBody(message?.mes);
+    return signatureForBody(message, recordBody(message?.mes));
+}
+
+function legacyMessageStateSignature(message) {
+    return signatureForBody(message, stripCompatibleSfwTag(stripStateTag(message?.mes)));
+}
+
+function signatureForBody(message, text) {
     let hash = 2166136261;
     for (let i = 0; i < text.length; i++) {
         hash ^= text.charCodeAt(i);
@@ -1461,11 +1485,11 @@ function harvestMessage(message) {
     const signature = messageStateSignature(message);
     const previous = snapshotForMessage(message);
     // 두 수신 훅 순서가 바뀌어도 같은 답변의 직접 보고를 우선한다.
-    const primary = direct ?? (previous?.messageSignature === signature ? previous.state : null);
+    const primary = direct ?? (snapshotMatchesMessage(message, previous) ? previous.state : null);
     const state = compatible ? mergeCurrentReports(primary, compatible) : direct;
     if (state) {
         const store = getMessageStore(message);
-        store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature };
+        store.swipes[String(swipeIndex)] = { state, at: Date.now(), messageSignature: signature, signatureVersion: 2 };
         found = true;
     }
     // SFW must be able to harvest its own report after a same-response release.
@@ -1495,7 +1519,8 @@ function assistantMessages() {
 }
 
 function snapshotMatchesMessage(message, snapshot = snapshotForMessage(message)) {
-    return Boolean(snapshot?.state && snapshot.messageSignature === messageStateSignature(message));
+    return Boolean(snapshot?.state && (snapshot.messageSignature === messageStateSignature(message)
+        || (snapshot.signatureVersion !== 2 && snapshot.messageSignature === legacyMessageStateSignature(message))));
 }
 
 function currentStateTarget(message = assistantMessages().at(-1)) {
@@ -1608,13 +1633,14 @@ function actMatchesPlainBan(act, ban) {
 // 총량이 maxBannedActs를 넘으면 오래된 것부터 잘라서 주입문 비대화를 막는다.
 function recentActs(windowSize) {
     const ignored = ignoredActSet();
-    const messages = assistantMessages();
+    const limit = Math.max(1, Number(windowSize) || DEFAULT_SETTINGS.repeatWindow);
+    const messages = assistantMessages().slice(-limit);
     const rows = [];
-    for (let i = messages.length - 1; i >= 0 && rows.length < windowSize; i--) {
+    for (let i = messages.length - 1; i >= 0; i--) {
         const snapshot = snapshotForMessage(messages[i]);
-        if (!snapshot?.state?.acts?.length) continue;
+        if (!snapshot?.state?.acts?.length || !snapshotMatchesMessage(messages[i], snapshot)) continue;
         const acts = snapshot.state.acts.filter((act) => !isActIgnored(act, ignored));
-        if (acts.length) rows.unshift({ turnsAgo: rows.length + 1, acts });
+        if (acts.length) rows.unshift({ turnsAgo: messages.length - i, acts });
     }
     // 중복 제거 (같은 전개가 여러 턴에 반복 기록된 경우 최신 것만)
     const seenActs = [];
@@ -1645,7 +1671,7 @@ function recentDialogueBeats(windowSize = Number(getSettings().dialogueWindow) |
     const rows = [];
     for (const message of messages) {
         const snapshot = snapshotForMessage(message);
-        if (!snapshot?.state?.dialogueBeats?.length) continue;
+        if (!snapshot?.state?.dialogueBeats?.length || !snapshotMatchesMessage(message, snapshot)) continue;
         const beats = snapshot.state.dialogueBeats.filter((beat) => !isDialogueBeatIgnored(beat, ignored));
         if (beats.length) rows.push({ beats });
     }
@@ -2189,13 +2215,14 @@ function normalizeGenerationType(type) {
 // 자체 판단으로 NSFW 설정을 변경하거나 보조 AI를 별도로 호출하지 않는다.
 let sceneBridgeSyncing = false;
 globalThis.ttottoNsfwSceneBridge = Object.freeze({
-    beginGeneration(type) { beginSceneGeneration(type); },
+    beginGeneration(type) { if (runtimeActive) beginSceneGeneration(type); },
     collect(message) {
         const index = getContext().chat?.indexOf(message) ?? -1;
         if (index < 0 || !runtimeActive || !isFullyArmed()) return;
         handleIncomingMessage(index);
     },
     sync() {
+        if (!runtimeActive) return false;
         const settings = getSettings();
         const meta = getChatMeta();
         if (!runtimeActive || !settings.enabled || !settings.adultConfirmed || !meta) return false;
@@ -2232,6 +2259,7 @@ globalThis.ttottoNsfwGenerationInterceptor = async function ttottoNsfwGeneration
 // 미리 준비한 해제 브릿지는 실제 인터셉터 호출 때만 소모한다.
 function prepareSceneInjection({ generationType, consumeBridge = true } = {}) {
     clearInjectedPrompt();
+    if (!runtimeActive) return;
     try {
         if (!ALLOWED_GENERATION_TYPES.has(generationType)) { diagnosticRecord('injection_skipped', { reason: 'generation_type' }); return; }
         reconcileReportedRelease();
@@ -2448,11 +2476,27 @@ function captureRefineTarget() {
     return message ? { metadata: context.chatMetadata, message, swipe: currentSwipeIndex(message), text: recordBody(message.mes) } : null;
 }
 
+function awaitRefineResponse(signal) {
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            const error = new Error('Scene analysis cancelled');
+            error.name = 'AbortError';
+            reject(error);
+        };
+        if (signal.aborted) return onAbort();
+        signal.addEventListener('abort', onAbort, { once: true });
+        Promise.resolve().then(() => {
+            if (signal.aborted) { onAbort(); return; }
+            return requestRefine(signal);
+        }).then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    });
+}
+
 async function runRefine({ manual = false } = {}) {
     const settings = getSettings();
     if (!runtimeActive || !settings.enabled || !getChatMeta(false)?.enabled) return false;
     if (!manual && (!settings.autoRefine || !autoRefineNeeded())) return false;
-    if (!manual && generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) return false;
+    if (generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type)) || holdsRewriteGeneration()) return false;
     if (refineRunning) {
         if (!manual) queuedRefineTarget = captureRefineTarget();
         return false;
@@ -2486,7 +2530,7 @@ async function runRefine({ manual = false } = {}) {
     updateUi();
 
     try {
-        const response = await requestRefine(refineAbortController.signal);
+        const response = await awaitRefineResponse(refineAbortController.signal);
         // 보정 호출 중 스와이프/채팅/본문이 바뀌면 이전 장면을 새 답변에 덮어쓰지 않는다.
         if (refineAbortController?.signal.aborted || !runtimeActive || !isSupervising()
             || getContext().chatMetadata !== metadata || !getContext().chat?.includes(target)
@@ -2499,7 +2543,7 @@ async function runRefine({ manual = false } = {}) {
         // 보정 결과를 최신 AI 메시지의 현재 스와이프에도 붙여야 반복 목록과 슬로우번 체류 턴이 정상 계산된다.
         if (target) {
             const store = getMessageStore(target);
-            store.swipes[String(targetSwipe)] = { state, at: refinedAt, messageSignature: messageStateSignature(target) };
+            store.swipes[String(targetSwipe)] = { state, at: refinedAt, messageSignature: messageStateSignature(target), signatureVersion: 2 };
             persistChat();
         }
         meta.manualState = { state, at: refinedAt, source: 'ai-refine', target: currentStateTarget() };
@@ -2546,6 +2590,35 @@ function scheduleAutoRefine() {
     }, 900);
 }
 
+// Some translation/render wrappers change the message without an edit event.
+// Observe only the latest completed reply, with no model call of its own.
+let messageObserverTimer = null;
+let lastObservedMessage = null;
+function observeLatestMessage() {
+    if (!runtimeActive || !isSupervising() || holdsRewriteGeneration()
+        || generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) return;
+    const message = assistantMessages().at(-1);
+    if (!message || isPendingAssistant(message)) return;
+    const target = { metadata: getContext().chatMetadata, message,
+        swipe: currentSwipeIndex(message), text: String(message.mes ?? '') };
+    if (sameRefineTarget(target, lastObservedMessage)) return;
+    lastObservedMessage = target;
+    handleIncomingMessage(getContext().chat.indexOf(message));
+}
+
+function startMessageObserver() {
+    if (messageObserverTimer) return;
+    lastObservedMessage = null;
+    observeLatestMessage();
+    messageObserverTimer = setInterval(observeLatestMessage, 800);
+}
+
+function stopMessageObserver() {
+    if (messageObserverTimer) clearInterval(messageObserverTimer);
+    messageObserverTimer = null;
+    lastObservedMessage = null;
+}
+
 // ───────────────────────── 메시지 이벤트 처리 ─────────────────────────
 
 function messageByIndex(index) {
@@ -2589,6 +2662,7 @@ function reconcileReportedRelease() {
 
 // Apply the same temperature decision to collected and repaired reports.
 function applyReportedHeat(state, message) {
+    if (message !== assistantMessages().at(-1)) { diagnosticRecord('heat_decision', { reason: 'historical_report' }); return; }
     if (!isSupervising()) { diagnosticRecord('heat_decision', { reason: 'not_supervising' }); return; }
     const wasArmed = Boolean(getChatMeta(false)?.autoArmed);
     const settings = getSettings();
@@ -2654,6 +2728,7 @@ function applyReportedHeat(state, message) {
 }
 
 function handleIncomingMessage(index) {
+    if (!runtimeActive) return;
     const settings = getSettings();
     if (!settings.enabled || !settings.adultConfirmed) { diagnosticRecord('collection_skipped', { reason: 'disabled_or_unconfirmed' }); return; }
     const meta = getChatMeta(false);
@@ -2661,7 +2736,7 @@ function handleIncomingMessage(index) {
 
     const message = messageByIndex(index);
     if (!message || message.is_user || message.is_system) return;
-    if (isPendingAssistant(message) || holdsRewriteGeneration()) { diagnosticRecord('collection_skipped', { reason: 'pending_generation' }); return; }
+    if (isPendingAssistant(message) || holdsRewriteGeneration() || generationEvents.some((type) => ALLOWED_GENERATION_TYPES.has(type))) { diagnosticRecord('collection_skipped', { reason: 'pending_generation' }); return; }
     index = getContext().chat.indexOf(message);
     diagnosticResponse(message, index);
     lastCompletedAssistant = { metadata: getContext().chatMetadata, message };
@@ -3736,11 +3811,12 @@ function registerEvents() {
     });
     listen('CHARACTER_MESSAGE_RENDERED', (index) => { diagnosticRecord('message_rendered', { message: Number(index) }); handleIncomingMessage(index); });
     listen('MESSAGE_SWIPED', (index) => { diagnosticRecord('message_swiped', { message: Number(index) }); handleIncomingMessage(index); });
-    listen('MESSAGE_EDITED', (index) => { diagnosticRecord('message_edited', { message: Number(index) }); diagnosticTrackBody(messageByIndex(index), Number(index), 'message_edited'); updateUi(); });
+    listen('MESSAGE_EDITED', (index) => { diagnosticRecord('message_edited', { message: Number(index) }); diagnosticTrackBody(messageByIndex(index), Number(index), 'message_edited'); handleIncomingMessage(index); });
     listen('MESSAGE_DELETED', () => updateUi());
     listen('CHAT_CHANGED', () => {
         resetDiagnosticEvidence();
         diagnosticRecord('chat_changed');
+        lastObservedMessage = null;
         queuedRefineTarget = null;
         lastAutoRefineTarget = null;
         refineFailure = null;
@@ -3779,6 +3855,7 @@ async function initialize() {
         maybeStealthRelease();
         registerEvents();
         await initializeUi();
+        startMessageObserver();
         console.log(`${LOG_PREFIX} v${EXTENSION_VERSION} 로드 완료`);
 
     })();
@@ -3814,6 +3891,7 @@ export function onEnable() {
 
 export function onDisable() {
     runtimeActive = false;
+    stopMessageObserver();
     stopDiagnosticFetch();
     stopStateTagDisplayGuard();
     queuedRefineTarget = null;
@@ -3835,6 +3913,7 @@ export function onDisable() {
 }
 
 export function onClean() {
+    onDisable();
     stopDiagnosticFetch();
     clearDiagnostics();
     stopStateTagDisplayGuard();
