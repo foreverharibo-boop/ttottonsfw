@@ -450,3 +450,54 @@ for (const order of ['nsfw-first', 'sfw-first']) for (const heat of [0, 1, 2]) {
         assert.equal(r.report().current.slowBurnRecoveryPending, false);
     });
 }
+
+for (const order of ['nsfw-first', 'sfw-first']) for (const stopFirst of ['sfw', 'nsfw']) {
+    test(`body observers coexist and detach independently: ${order}, stop ${stopFirst}`, { skip: !pairedSfwSource }, () => {
+        const r = runtime();
+        r.context.extensionSettings['ttotto-sfw'] = { enabled: true, diagnosticsEnabled: true, autoRefine: false };
+        r.context.chatMetadata.ttottoSfw = { chatSchemaVersion: 1, enabled: true };
+        const script = pairedSfwSource.slice(0, pairedSfwSource.indexOf('const bootContext = getContext();'))
+            .replaceAll('export function ', 'function ').replace('import.meta.url', "'file:///extension/index.js'");
+        vm.runInContext('(function(){' + script + '\nglobalThis.sfwDiagnostics={getSettings,syncDiagnosticFetch,diagnosticReport,diagnosticTrackBody,clearDiagnostics,diagnosticWriteBody};})();', r.env,
+            { filename: 'http://localhost:8000/scripts/extensions/third-party/ttottosfw/index.js' });
+        const sfw = r.env.sfwDiagnostics; sfw.getSettings();
+        const message = { mes: 'Before' }; r.context.chat.push(message);
+        const observers = order === 'sfw-first' ? [sfw, r.api] : [r.api, sfw];
+        for (const api of observers) api.diagnosticTrackBody(message, 0, 'before_collection');
+        sfw.diagnosticWriteBody(message, 'Own SFW edit');
+        const sfwRows = () => JSON.parse(sfw.diagnosticReport()).events;
+        const writes = rows => rows.filter(e => e.stage === 'body_write');
+        assert.equal(writes(sfwRows()).at(-1).data.ownWrite, true);
+        assert.equal(writes(r.rows()).at(-1).data.ownWrite, false);
+        for (const rows of [sfwRows(), r.rows()]) {
+            assert.equal(writes(rows).at(-1).data.writeTrace[0].script, '/scripts/extensions/third-party/ttottosfw/index.js');
+            assert.ok(!rows.some(e => e.stage === 'body_write_trace_unavailable'));
+        }
+        vm.runInContext("SillyTavern.getContext().chat[0].mes = 'Cleaner edit'", r.env,
+            { filename: 'http://localhost:8000/scripts/extensions/third-party/cleaner/index.js?PRIVATE_KEY' });
+        for (const rows of [sfwRows(), r.rows()]) assert.equal(writes(rows).at(-1).data.writeTrace[0].script, '/scripts/extensions/third-party/cleaner/index.js');
+        const first = stopFirst === 'sfw' ? sfw : r.api;
+        const last = stopFirst === 'sfw' ? r.api : sfw;
+        first.clearDiagnostics();
+        assert.equal(typeof Object.getOwnPropertyDescriptor(message, 'mes').set, 'function');
+        const before = JSON.parse(last.diagnosticReport()).events.filter(e => e.stage === 'body_write').length;
+        message.mes = 'One observer';
+        assert.equal(JSON.parse(first.diagnosticReport()).events.length, 0);
+        assert.equal(JSON.parse(last.diagnosticReport()).events.filter(e => e.stage === 'body_write').length, before + 1);
+        last.clearDiagnostics();
+        assert.equal(Object.getOwnPropertyDescriptor(message, 'mes').get, undefined);
+        assert.equal(message.mes, 'One observer');
+    });
+}
+
+test('inherited assignments and same-metadata chat ID switches retain native semantics', () => {
+    const r = runtime(), message = { mes: 'Parent' }; r.context.chat.push(message); r.context.chatId = 'first';
+    r.api.diagnosticTrackBody(message, 0, 'before_collection');
+    const child = Object.create(message); child.mes = 'Child';
+    assert.equal(message.mes, 'Parent'); assert.equal(child.mes, 'Child');
+    assert.equal(Object.getOwnPropertyDescriptor(child, 'mes').writable, true);
+    assert.ok(!r.rows().some(e => e.stage === 'body_write'));
+    r.context.chatId = 'second'; message.mes = 'Different chat';
+    assert.equal(Object.getOwnPropertyDescriptor(message, 'mes').get, undefined);
+    assert.ok(!r.rows().some(e => e.stage === 'body_write'));
+});

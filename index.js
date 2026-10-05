@@ -158,7 +158,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.28';
+const EXTENSION_VERSION = '0.13.29';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -312,15 +312,28 @@ let diagnosticResponses = [];
 const diagnosticBodyWatches = new Map();
 let diagnosticOwnBodyWrite = null;
 let diagnosticWriting = false;
+// Shared observation only: each extension retains its own collection/state engine.
+const diagnosticWatchRegistryKey = Symbol.for('ttotto.body-write-observers.v1');
+const diagnosticWatchRegistry = globalThis[diagnosticWatchRegistryKey] ??= new WeakMap();
+const diagnosticChatId = () => getContext().getCurrentChatId?.() ?? getContext().chatId;
 function diagnosticUnwatchBody(message) {
     const watch = diagnosticBodyWatches.get(message);
     if (!watch) return;
-    // Do not overwrite a descriptor installed by another component afterwards.
-    const descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
-    if (descriptor?.get === watch.get && descriptor?.set === watch.set && descriptor.configurable) {
-        Object.defineProperty(message, 'mes', { ...watch.original, value: watch.value });
-    }
+    const shared = watch.shared;
+    shared.listeners.delete(watch.listener);
     diagnosticBodyWatches.delete(message);
+    if (shared.listeners.size) return;
+    const descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
+    if (descriptor?.get === shared.get && descriptor?.set === shared.set && descriptor.configurable) {
+        Object.defineProperty(message, 'mes', { ...shared.original, value: shared.value });
+    }
+    if (diagnosticWatchRegistry.get(message) === shared) diagnosticWatchRegistry.delete(message);
+}
+function diagnosticWriteBody(message, text) {
+    const previous = diagnosticOwnBodyWrite;
+    diagnosticOwnBodyWrite = message;
+    try { message.mes = text; }
+    finally { diagnosticOwnBodyWrite = previous; }
 }
 function resetDiagnosticEvidence() {
     for (const message of diagnosticBodyWatches.keys()) diagnosticUnwatchBody(message);
@@ -376,38 +389,57 @@ function diagnosticWriteTrace(stack) {
 }
 function diagnosticWatchBody(message, index, swipe, chat) {
     const existing = diagnosticBodyWatches.get(message);
-    const descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
-    if (existing && existing.chat === chat && descriptor?.get === existing.get && descriptor?.set === existing.set) {
+    let descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
+    if (existing && existing.chat === chat && existing.chatId === diagnosticChatId()
+        && descriptor?.get === existing.shared.get && descriptor?.set === existing.shared.set) {
         existing.swipe = swipe;
-        existing.chat = chat;
         return;
     }
-    if (existing && existing.chat !== chat) {
-        diagnosticUnwatchBody(message);
-        return diagnosticWatchBody(message, index, swipe, chat);
-    }
-    if (existing) diagnosticBodyWatches.delete(message);
-    // Observe ordinary string fields only, never wrap somebody else's accessor.
-    if (!descriptor?.configurable || !descriptor.writable || typeof descriptor.value !== 'string') {
-        diagnosticRecord('body_write_trace_unavailable', { reason: 'unsupported_descriptor', message: index, swipe }, chat);
-        return;
-    }
-    const watch = { original: descriptor, value: descriptor.value, swipe, chat };
-    watch.get = function () { return watch.value; };
-    watch.set = function (value) {
-        // Preserve inherited-field assignment semantics too.
-        if (this !== message) {
-            Object.defineProperty(this, 'mes', { value, writable: true, configurable: true, enumerable: true });
+    if (existing) diagnosticUnwatchBody(message);
+    descriptor = Object.getOwnPropertyDescriptor(message, 'mes');
+    let shared = diagnosticWatchRegistry.get(message);
+    if (!shared || descriptor?.get !== shared.get || descriptor?.set !== shared.set) {
+        // Never wrap a foreign accessor, even if a former observer was replaced.
+        if (!descriptor?.configurable || !descriptor.writable || typeof descriptor.value !== 'string') {
+            diagnosticRecord('body_write_trace_unavailable', { reason: 'unsupported_descriptor', message: index, swipe }, chat);
             return;
         }
-        const old = watch.value;
-        watch.value = value; // Always deliver the actual write before diagnostics.
-        if (diagnosticWriting || old === value) return;
+        shared = { original: descriptor, value: descriptor.value, listeners: new Set(), writing: false };
+        shared.get = function () { return shared.value; };
+        shared.set = function (value) {
+            if (this !== message) {
+                Object.defineProperty(this, 'mes', { value, writable: true, configurable: true, enumerable: true });
+                return;
+            }
+            const old = shared.value;
+            shared.value = value; // Actual assignment always succeeds before observation.
+            if (shared.writing || old === value) return;
+            shared.writing = true;
+            try {
+                const trace = diagnosticWriteTrace(new Error().stack);
+                for (const listener of [...shared.listeners]) {
+                    try { listener(old, value, trace); } catch { /* Do not disrupt another observer. */ }
+                }
+            } catch { /* Diagnostics must never make an assignment fail. */ }
+            finally { shared.writing = false; }
+        };
+        try {
+            Object.defineProperty(message, 'mes', { configurable: true, enumerable: descriptor.enumerable, get: shared.get, set: shared.set });
+            diagnosticWatchRegistry.set(message, shared);
+        } catch {
+            diagnosticRecord('body_write_trace_unavailable', { reason: 'unsupported_descriptor', message: index, swipe }, chat);
+            return;
+        }
+    }
+    const watch = { shared, swipe, chat, chatId: diagnosticChatId() };
+    watch.listener = (old, value, writeTrace) => {
+        if (diagnosticWriting) return;
         diagnosticWriting = true;
         try {
             if (!diagnosticsEnabled()) { diagnosticUnwatchBody(message); return; }
             const actualIndex = getContext().chat?.indexOf(message) ?? -1;
-            if (watch.chat !== diagnosticScope() || actualIndex < 0 || message.is_user || message.is_system) {
+            if (watch.chat !== diagnosticScope() || watch.chatId !== diagnosticChatId()
+                || actualIndex < 0 || message.is_user || message.is_system) {
                 diagnosticUnwatchBody(message); return;
             }
             if (watch.swipe !== currentSwipeIndex(message)) {
@@ -418,22 +450,16 @@ function diagnosticWatchBody(message, index, swipe, chat) {
                 diagnosticRecord('body_write_trace_unavailable', { reason: 'size_or_type_limit', message: actualIndex }, chat);
                 diagnosticUnwatchBody(message); return;
             }
-            const writeTrace = diagnosticWriteTrace(new Error().stack);
             diagnosticRecord('body_write', { message: actualIndex, swipe: watch.swipe,
                 ownWrite: diagnosticOwnBodyWrite === message,
                 writerLocated: writeTrace[0]?.source === 'client_script', writeTrace,
                 ...diagnosticBodyDiff(old, value), ...diagnosticCache(message) }, chat);
-        } catch { /* Observation must not make a successful message write fail. */ }
-        finally { diagnosticWriting = false; }
+        } finally { diagnosticWriting = false; }
     };
-    try {
-        Object.defineProperty(message, 'mes', { configurable: true, enumerable: descriptor.enumerable, get: watch.get, set: watch.set });
-        diagnosticBodyWatches.set(message, watch);
-        if (diagnosticBodyWatches.size > 12) diagnosticUnwatchBody(diagnosticBodyWatches.keys().next().value);
-        diagnosticRecord('body_write_trace_started', { message: index, swipe }, chat);
-    } catch {
-        diagnosticRecord('body_write_trace_unavailable', { reason: 'unsupported_descriptor', message: index, swipe }, chat);
-    }
+    shared.listeners.add(watch.listener);
+    diagnosticBodyWatches.set(message, watch);
+    if (diagnosticBodyWatches.size > 12) diagnosticUnwatchBody(diagnosticBodyWatches.keys().next().value);
+    diagnosticRecord('body_write_trace_started', { message: index, swipe }, chat);
 }
 function diagnosticNsfwReport(text) {
     const blocks = [...String(text ?? '').matchAll(/<scene_state\b[^>]*>([\s\S]*?)<\/scene_state>/gi)];
@@ -654,6 +680,7 @@ function diagnosticState() {
 function diagnosticReport() {
     return JSON.stringify({ extension: MODULE_NAME, version: EXTENSION_VERSION, recording: diagnosticsEnabled(),
         note: 'Memory-only; no API keys or dialogue contents. request_observed means the fetch boundary, not proof of model receipt. server_response_observed describes a bounded response copy at the fetch boundary, not guaranteed provider-original output if another wrapper precedes this one. Response/message links require matching bodies; unmatched or ambiguous results are unconfirmed. body_write observes assignments to watched message fields, not the origin of computed text; writeTrace contains only same-origin client script paths and line/column numbers, never full URLs or raw stacks. Unknown frames and writes before observation or via object/descriptor replacement are unconfirmed. Changed character counts describe one enclosing difference range, not a full edit script. No raw bodies are exported.',
+        bodyWriteNote: 'body_write observes assignments to watched message fields, not the origin of computed text. writeTrace contains only same-origin client script paths and line/column numbers, never full URLs or raw stacks. Unknown frames and writes before observation or via object/descriptor replacement are unconfirmed. Change counts describe one enclosing difference range. No raw dialogue is exported.',
         current: diagnosticState(), events: diagnosticRows }, null, 2);
 }
 function renderDiagnostics() {
