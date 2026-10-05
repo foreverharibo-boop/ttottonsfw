@@ -1,3 +1,8 @@
+/* The settings panel is available only through the wand popup. */
+#ttotto-nsfw-settings:not(.tns-in-popup) {
+    display: none !important;
+}
+
 #ttotto-nsfw-settings {
     box-sizing: border-box;
     min-width: 0;
