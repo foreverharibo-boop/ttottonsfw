@@ -167,7 +167,7 @@ test('unrelated ordinary scenes still honor two-message cold streak',()=>{
 test('thresholds, UI, version and heat instructions agree',()=>{
     assert.match(index,/high: 3, normal: 4, low: 7/);
     assert.match(index,/Ordinary bathing, showering/);
-    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.24');
+    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.25');
     assert.match(fs.readFileSync(new URL('settings.html',root),'utf8'),/민감 3점 · 보통 4점 · 둔감 7점/);
 });
 
