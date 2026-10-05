@@ -54,8 +54,8 @@ test('40-character post-collection deletion identifies the writer and stage inva
     r.api.handleIncomingMessage(0);
     assert.equal(r.report().current.currentStagePresent, false);
     assert.equal(r.report().current.latestBodyChanged, true);
-    assert.equal(r.report().current.stageSource, 'default');
-    assert.equal(r.report().current.displayedStage, 1);
+    assert.equal(r.report().current.stageSource, 'unknown');
+    assert.equal(r.report().current.displayedStage, null);
     assert.equal(r.report().current.autoArmed, true);
     assert.equal(r.settings.autoRefine, false); assert.equal(r.calls.length, 0);
     assert.ok(r.rows().some(e => e.stage === 'cache_invalidated' && e.data.savedStage === 5));
