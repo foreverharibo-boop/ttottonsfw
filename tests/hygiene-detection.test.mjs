@@ -167,7 +167,7 @@ test('unrelated ordinary scenes still honor two-message cold streak',()=>{
 test('thresholds, UI, version and heat instructions agree',()=>{
     assert.match(index,/high: 3, normal: 4, low: 7/);
     assert.match(index,/Ordinary bathing, showering/);
-    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.25');
+    assert.equal(JSON.parse(fs.readFileSync(new URL('manifest.json',root))).version,'0.13.26');
     assert.match(fs.readFileSync(new URL('settings.html',root),'utf8'),/민감 3점 · 보통 4점 · 둔감 7점/);
 });
 
@@ -430,3 +430,34 @@ for (const change of ['none','body','swipe','new-reply','high','missing','manual
         r.noCalls();
     });
 }
+
+for (const heat of [7, 8]) test(`auto keeps ownership after a heat-${heat} reply is edited`,()=>{
+    const body='The conversation continued with indirect wording.';
+    const r=runtime({mode:'auto',chat:[message('Continue.',true),message(body+`<scene_state>{"heat":${heat}}</scene_state>`)]});
+    r.api.handleIncomingMessage(1);
+    assert.equal(r.meta.autoArmed,true);
+    r.context.chat[1].mes=body+' A sentence was edited.';
+    r.api.handleIncomingMessage(1);
+    assert.equal(r.meta.autoArmed,true,'missing valid heat is not evidence of a scene ending');
+    assert.equal(r.meta.sfwImmediateHandoff,false);
+    assert.equal(r.env.ttottoNsfwSceneBridge.sync(),true);
+    r.noCalls();
+    // A subsequent matching low-temperature report still releases immediately.
+    r.context.chat.push(message('Continue.',true),message('The conversation continued.<scene_state>{"heat":1}</scene_state>'));
+    r.api.handleIncomingMessage(3);
+    assert.equal(r.meta.autoArmed,false);
+    assert.equal(r.meta.sfwImmediateHandoff,true);
+});
+
+test('auto does not infer a scene ending from an absent report and absent keywords',()=>{
+    const r=runtime({mode:'auto',armed:true,chat:[message('Continue.',true),message('Indirect wording without a state report.')]});
+    assert.equal(r.api.maybeStealthRelease(),false);
+    assert.equal(r.meta.autoArmed,true);
+    r.noCalls();
+});
+
+test('auto still permits an explicit routine transition without a new report',()=>{
+    const r=runtime({mode:'auto',armed:true,chat:[message('An earlier reply.'),message('I showered with soap.',true)]});
+    assert.equal(r.api.maybeStealthRelease(),true);
+    assert.equal(r.meta.sfwImmediateHandoff,true);
+});

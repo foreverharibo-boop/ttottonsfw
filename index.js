@@ -158,7 +158,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.25';
+const EXTENSION_VERSION = '0.13.26';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -1200,7 +1200,18 @@ function maybeStealthRelease() {
     if (settings.armMode === 'manual' || !meta?.autoArmed || meta.forceArmed || holdsRewriteGeneration() || !stealthColdStreak()) return false;
     // 은유 때문에 단어 점수가 0이어도 현재 응답의 유효한 높은 온도 보고는 유지한다.
     // 최근 창 밖의 오래된 상태나 현재 스와이프와 맞지 않는 상태는 쓰지 않는다.
-    if (recentReportedHeat() > AUTO_ARM_OFF) return false;
+    const heat = recentReportedHeat();
+    if (heat > AUTO_ARM_OFF) return false;
+    // Temperature mode must not mistake an absent/invalid report for cold heat.
+    // Lexical absence is only a fallback for stealth. Explicit routine changes
+    // remain eligible for handoff, including a new user-authored transition.
+    const latest = (Array.isArray(getContext().chat) ? getContext().chat : [])
+        .filter((message) => message && !message.is_system).at(-1);
+    const routineTransition = Boolean(latest && nsfwScoreDetail(stripStateTag(latest.mes)).routineOnly);
+    if (settings.armMode === 'auto' && heat == null && !routineTransition) {
+        diagnosticRecord('release_skipped', { reason: 'missing_current_heat', ...diagnosticState() });
+        return false;
+    }
     const prematureSlowBurnEnd = settings.slowBurnEnabled
         && meta.slowBurnSessionActive
         && !slowBurnProgress(settings).canConclude;
@@ -1219,7 +1230,7 @@ function maybeStealthRelease() {
     meta.stealthCooldownFrom = chat.length;
     meta.stealthCooldownReason = 'scene-ended';
     saveChatMeta();
-    diagnosticRecord('release_decision', { reason: 'current_scene_ended', ...diagnosticState() });
+    diagnosticRecord('release_decision', { reason: 'current_scene_ended', routineTransition, reportedHeatPresent: heat != null, ...(heat != null ? { reportedHeat: heat } : {}), ...diagnosticState() });
     toastr.info('현재 성적 행동이 끝난 것을 감지해 또또SFW로 인계해요.', '🔞또또NSFW');
     if (uiReady) updateUi();
     return true;
@@ -2762,8 +2773,8 @@ function handleIncomingMessage(index) {
     // 스텔스만 본문 점수로 시작/유지한다. 온도 자동은 AI의 온도 보고를 따른다.
     maybeStealthArm();
     applyReportedHeat(state, message);
-    // 해제 폴백: 모델의 온도 보고와 무관하게, 최근 턴들이 연속으로 신호 0점이면 개입 해제
-    // (모델이 온도를 계속 높게 불러서 일상 장면에까지 진행 지시가 들어가는 것 방지)
+    // 온도 자동은 유효한 낮은 보고 또는 명확한 일상 전환으로만 해제한다.
+    // 단어 부재만으로 해제하는 폴백은 스텔스 모드에 한정한다.
     if (settings.armMode !== 'manual') maybeStealthRelease();
     if (changed) {
         rerenderMessage(index, message);
