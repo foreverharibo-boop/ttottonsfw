@@ -66,7 +66,7 @@ test('stage omission is distinct from a saved stage invalidated later', () => {
     const r = runtime(); r.settings.slowBurnEnabled = true;
     r.context.chat.push({ mes: 'Reply.' + stateTag }); r.api.handleIncomingMessage(0);
     const observed = r.rows().find(e => e.stage === 'response_observed').data;
-    assert.equal(observed.reportedStagePresent, false); assert.ok(observed.missing.includes('stage'));
+    assert.equal(observed.reportedStagePresent, false); assert.ok(!observed.missing.includes('stage'), 'idle temperature monitor has no sexual-stage contract');
     assert.equal(r.report().current.currentStagePresent, false); assert.equal(r.report().current.stageSource, 'heat');
     r.context.chatMetadata.ttottoNsfw.slowBurnStageOverride = 3;
     assert.equal(r.report().current.displayedStage, 3); assert.equal(r.report().current.stageSource, 'manual');

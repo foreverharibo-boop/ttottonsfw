@@ -121,7 +121,7 @@ for (const [heat, stage] of [[7, 1], [8, 1], [10, 2]]) test(`heat ${heat}/stage 
         const prompt = r.prepare();
         assert.match(prompt, /CURRENT STAGE UNCONFIRMED/);
         assert.match(prompt, /Reassess BOTH heat and stage/);
-        assert.match(prompt, /stage value 1 is a FORMAT PLACEHOLDER/);
+        assert.match(prompt, /Example numbers are placeholders/);
         assert.doesNotMatch(prompt, /CURRENT STAGE \d\/6|MAXIMUM CHARACTER-INITIATED STAGE|current cap \d/);
         assert.match(prompt, /clothing: Coat/);
         const current = r.api.diagnosticState();
