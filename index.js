@@ -1,3 +1,33 @@
+// BEGIN scene-collection-ui.js
+// Global NSFW description settings, independent of custom prompt scopes.
+function renderSceneCollectionUi() {
+    const settings = getSettings(), config = settings.sceneCollection ?? {};
+    const master = element('tns-scene-collection-enabled');
+    if (!master) return;
+    master.checked = config.enabled !== false;
+    for (const key of Object.keys(sceneCollectionFields())) {
+        const input = element(`tns-scene-collect-${key}`);
+        if (!input) continue;
+        input.checked = config.fields?.[key] !== false;
+        input.disabled = !master.checked;
+    }
+}
+function bindSceneCollectionUi() {
+    for (const key of ['enabled', ...Object.keys(sceneCollectionFields())]) {
+        const input = element(key === 'enabled' ? 'tns-scene-collection-enabled' : `tns-scene-collect-${key}`);
+        input?.addEventListener('change', () => {
+            const settings = getSettings();
+            const config = settings.sceneCollection ??= {};
+            if (key === 'enabled') config.enabled = input.checked;
+            else (config.fields ??= {})[key] = input.checked;
+            getContext().saveSettingsDebounced?.();
+            clearInjectedPrompt();
+            updateUi();
+        });
+    }
+}
+
+// END scene-collection-ui.js
 // BEGIN custom-injection.js
 // Shared by the standalone NSFW engine and the unified NSFW adapter.
 // Identity is card-avatar -> UUID, never a display name or mutable array index.
@@ -376,6 +406,37 @@ function createBodyTokenCounter({ raw, ready, allowed, epoch, swipe, save, recor
 // END body-tokens.js
 
 // BEGIN compact-report.js
+// Scene descriptions are optional; control/history fields are never masked.
+function sceneCollectionFields(settings = {}) {
+    const config = settings.sceneCollection ?? {};
+    return Object.fromEntries(['location', 'time', 'environment', 'objects', 'appearance', 'position', 'holding', 'condition', 'contact']
+        .map(key => [key, config.enabled !== false && config.fields?.[key] !== false]));
+}
+
+function filterSceneCollection(raw, settings = {}) {
+    if (!raw || typeof raw !== 'object') return raw;
+    const fields = sceneCollectionFields(settings);
+    if (Object.values(fields).every(Boolean)) return raw;
+    const out = structuredClone(raw);
+    const filter = scene => {
+        if (!scene || typeof scene !== 'object') return;
+        for (const [field, keys] of Object.entries({ location: ['location'], time: ['time'], environment: ['environment'], objects: ['important_objects', 'importantObjects'] })) {
+            if (!fields[field]) for (const key of keys) delete scene[key];
+        }
+        if (scene.characters && typeof scene.characters === 'object') {
+            for (const [name, person] of Object.entries(scene.characters)) {
+                if (!person || typeof person !== 'object') continue;
+                for (const [field, keys] of Object.entries({ appearance: ['appearance', 'clothing'], position: ['position'], holding: ['holding'], condition: ['condition'], contact: ['contact'] })) {
+                    if (!fields[field]) for (const key of keys) delete person[key];
+                }
+                if (!Object.keys(person).length) delete scene.characters[name];
+            }
+        }
+    };
+    filter(out); filter(out.scene);
+    return out;
+}
+
 // One wire record; the existing stores/UI remain backward compatible.
 // Machine keys stay stable. Only descriptive values are Korean, not the RP prose.
 function expandCompactReport(raw, kind) {
@@ -414,7 +475,9 @@ function compactReportLines(kind, options, { repair = false, heatRules = [], sta
     if (active.dialogueBeatGuard || (options.sfwEnabled && sfw.dialogueBeatGuard)) scene.dialogue_beats = [];
     if (sfw.dialogueFlow) scene.dialogue_flow = { topic: '', last_question: '', new_facts: [] };
     if (active.nextBeatHints || (options.sfwEnabled && sfw.nextBeatHints)) scene.next = [];
-    const record = { _v: 2, scene, ...(heat ? { heat: 0 } : {}) };
+    const selected = kind === 'nsfw' ? filterSceneCollection(scene, nsfw) : scene;
+    if (selected.characters && !Object.keys(selected.characters).length) delete selected.characters;
+    const record = { _v: 2, scene: selected, ...(heat ? { heat: 0 } : {}) };
     if (kind === 'nsfw' && nsfw.slowBurnEnabled) record.stage = 1;
     const tag = kind === 'nsfw' ? 'scene_state' : 'sfw_scene';
     return [
@@ -422,8 +485,8 @@ function compactReportLines(kind, options, { repair = false, heatRules = [], sta
             : 'STATE REPORT: End your response with exactly one state block (single-line JSON, hidden from the reader). No other scene report:',
         repair ? JSON.stringify(record) : `<${tag}>${JSON.stringify(record)}</${tag}>`,
         'Write descriptive values concisely in Korean only; keep JSON keys, enum values and character names unchanged. Do not add English translations. This language rule applies ONLY to the record, not the story.',
-        'Record facts at the END of the reply. Include every present character and relevant object, including unchanged facts. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
-        'Use RP time only, never the real date/clock. Preserve explicit in-story date/time (including Info_panel); otherwise keep established time context without inventing a clock time.',
+        kind === 'sfw' ? 'Record facts at the END of the reply. Include every present character and relevant object, including unchanged facts. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.' : 'Record facts at the END of the reply using ONLY the fields in this schema. Omit disabled fields entirely; do not relocate their descriptions into other fields. For selected fields, include unchanged facts and every relevant character/object. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
+        ...('time' in selected ? ['Use RP time only, never the real date/clock. Preserve explicit in-story date/time (including Info_panel); otherwise keep established time context without inventing a clock time.'] : []),
         'scene_type: general/daily/conversation/romance/conflict/action/investigation; keep it unless the dominant scene changes. intensity: narrative tension 0-10, not sexual heat.',
         ...(scene.stage !== undefined ? ['scene.stage: observed narrative progression 1 setup, 2 engagement, 3 first development, 4 deepening, 5 decisive turn, 6 resolution; not sexual stage or permission to finish.'] : []),
         ...(scene.acts ? ['acts: up to 4 substantive NEW beats from this reply, not routine logistics.'] : []),
@@ -1898,6 +1961,7 @@ function hasBi(bi) {
 }
 
 function sanitizeState(raw) {
+    raw = filterSceneCollection(raw, getSettings());
     raw = expandCompactReport(raw, 'nsfw');
     if (!raw || typeof raw !== 'object') return null;
     const clean = {
@@ -1933,17 +1997,18 @@ function sanitizeState(raw) {
     clean.next = next.map(toBi).filter(hasBi).slice(0, 8);
     const hasCharacters = Object.values(clean.characters).some((info) => hasBi(info.clothing) || hasBi(info.position) || hasBi(info.contact));
     if (!hasBi(clean.location) && !hasCharacters && !clean.acts.length && !clean.dialogueBeats.length && clean.heat === null && clean.stage === null && !clean.next.length) return null;
-    return clean;
+    return filterSceneCollection(clean, getSettings());
 }
 
 function stateCompletenessIssues(state, settings = getSettings()) {
     if (!state) return ['state'];
     const issues = [];
-    if (!hasBi(state.location)) issues.push('location');
+    const fields = sceneCollectionFields(settings);
+    if (fields.location && !hasBi(state.location)) issues.push('location');
     const hasCharacterState = Object.values(state.characters ?? {}).some(
         (info) => hasBi(info.clothing) || hasBi(info.position) || hasBi(info.contact),
     );
-    if (!hasCharacterState) issues.push('characters');
+    if ((fields.appearance || fields.position || fields.contact) && !hasCharacterState) issues.push('characters');
     if (!state.acts?.length) issues.push('acts');
     if (state.heat === null || state.heat === undefined) issues.push('heat');
     if (settings.slowBurnEnabled && isFullyArmed() && (state.stage === null || state.stage === undefined)) issues.push('stage');
@@ -2223,16 +2288,16 @@ function effectiveState() {
     const manual = meta?.manualState;
     if (manualMatchesLatest(manual, message, snapshot)
         && (!valid || Number(manual.at ?? 0) >= Number(snapshot.at ?? 0))) {
-        return { state: manual.state, source: manual.source ?? 'manual' };
+        return { state: filterSceneCollection(manual.state, getSettings()), source: manual.source ?? 'manual' };
     }
-    if (valid) return { state: snapshot.state, source: 'tag' };
+    if (valid) return { state: filterSceneCollection(snapshot.state, getSettings()), source: 'tag' };
     return { state: null, source: snapshot?.state ? 'body-changed' : 'missing-report' };
 }
 
 function stateForDisplay() {
     const current = effectiveState();
     if (current.source !== 'body-changed') return current;
-    return { state: snapshotForMessage(assistantMessages().at(-1))?.state ?? null, source: 'body-changed' };
+    return { state: filterSceneCollection(snapshotForMessage(assistantMessages().at(-1))?.state ?? null, getSettings()), source: 'body-changed' };
 }
 
 function ignoredActSet() {
@@ -2468,8 +2533,9 @@ function buildCardPreferenceLines() {
 // ───────────────────────── 주입문 생성 ─────────────────────────
 
 function buildStateLines(state) {
+    state = filterSceneCollection(state, getSettings());
     const lines = [];
-    const common = sharedCompactReport(assistantMessages().at(-1))?.scene;
+    const common = filterSceneCollection(sharedCompactReport(assistantMessages().at(-1))?.scene, getSettings());
     if (common) {
         if (hasBi(toBi(common.time))) lines.push(`- RP time/context: ${biText(toBi(common.time), 'en')}`);
         if (hasBi(toBi(common.environment))) lines.push(`- Environment: ${biText(toBi(common.environment), 'en')}`);
@@ -2846,7 +2912,7 @@ function buildInjection() {
             'Clothing that has been removed stays removed. Positions, locations, and contact only change through explicit on-page actions in your response. Never silently reset or teleport anything.',
         );
     } else {
-        sections.push('No location/character state has been recorded yet. Derive the current state from the latest roleplay prose, preserve those established facts, and report the complete state in the block below. A temperature-only record is not a full scene state.');
+        sections.push('No current state has been recorded yet. Use the latest roleplay prose and report only the selected fields in the schema below. Do not reconstruct disabled fields.');
     }
 
     const customBans = (getChatMeta(false)?.customBans ?? []).filter(Boolean);
@@ -3726,7 +3792,9 @@ function renderStatePanel() {
     heatBadge.title = '최신 답변과 일치하는 온도 보고만 표시합니다. 누락은 0이 아닙니다.';
     heatBadge.classList.toggle('is-hot', heat !== null && heat !== undefined && heat >= AUTO_ARM_ON);
 
+    const collectionFields = sceneCollectionFields(settings);
     const locationInput = element('tns-state-location');
+    locationInput.closest('label').hidden = !collectionFields.location;
     if (document.activeElement !== locationInput) locationInput.value = biText(state?.location);
 
     const list = element('tns-char-list');
@@ -3739,6 +3807,7 @@ function renderStatePanel() {
         title.textContent = name;
         row.append(title);
         for (const [field, label] of [['clothing', '복장'], ['position', '자세·위치'], ['contact', '접촉']]) {
+            if (!collectionFields[field === 'clothing' ? 'appearance' : field]) continue;
             const wrap = document.createElement('label');
             wrap.className = 'tns-char-field';
             const caption = document.createElement('span');
@@ -3758,7 +3827,7 @@ function renderStatePanel() {
         }
         list.append(row);
     }
-    element('tns-char-empty').hidden = Object.keys(characters).length > 0;
+    element('tns-char-empty').hidden = Object.keys(characters).length > 0 || !(collectionFields.appearance || collectionFields.position || collectionFields.contact);
 
     const actsList = element('tns-acts-list');
     actsList.replaceChildren();
@@ -3981,6 +4050,7 @@ function updateUi() {
     if (!uiReady) return;
     try {
         renderCustomInjectionUi();
+        renderSceneCollectionUi();
         const settings = getSettings();
         // 새 채팅도 설정 화면을 여는 즉시 기본 사용 상태를 생성·저장한다.
         const meta = getChatMeta();
@@ -4084,6 +4154,7 @@ function bindSetting(id, key, parser = (value) => value, after = null) {
 
 function bindUi() {
     bindCustomInjectionUi();
+    bindSceneCollectionUi();
     bindSetting('tns-diagnostics-enabled', 'diagnosticsEnabled', Boolean, () => {
         diagnosticRecord('recording_started', diagnosticState());
         renderDiagnostics();
@@ -4727,8 +4798,21 @@ function standaloneReportOptions(stageActive = true) {
 function standaloneHeatRules() {
     return STANDALONE_KIND === 'nsfw' ? HEAT_SCALE_LINES : (compactPeer()?.heatRules?.() ?? []);
 }
+function selectedLegacyReportLines(repair = false, nextGuidance = '') {
+    const options = standaloneReportOptions(isFullyArmed());
+    const lines = compactReportLines('nsfw', options, { repair: true, heatRules: standaloneHeatRules(),
+        stageRules: SLOW_BURN_STAGE_REPORT_RULES, nextGuidance });
+    const compact = JSON.parse(lines[1]);
+    const legacy = filterSceneCollection(expandCompactReport(compact, 'nsfw'), getSettings());
+    delete legacy.scene;
+    lines[1] = repair ? JSON.stringify(legacy) : `<scene_state>${JSON.stringify(legacy)}</scene_state>`;
+    if (!repair) lines[0] = 'STATE REPORT: End your response with exactly one hidden single-line JSON state block:';
+    // The old peer supports only native location/clothing/position/contact fields.
+    return lines.filter(line => !line.startsWith('Use RP time only') && !line.startsWith('scene_type:') && !line.startsWith('scene.stage:'));
+}
 function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuidance = '') {
-    if (!compactReportsEnabled()) return legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance);
+    if (!compactReportsEnabled()) return Object.values(sceneCollectionFields(getSettings())).every(Boolean)
+        ? legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance) : selectedLegacyReportLines(false, nextGuidance);
     return compactReportLines(STANDALONE_KIND, standaloneReportOptions(), {
         heatRules: standaloneHeatRules(),
         stageRules: STANDALONE_KIND === 'nsfw' ? SLOW_BURN_STAGE_REPORT_RULES : [],
@@ -4736,7 +4820,11 @@ function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuida
     });
 }
 function refinePromptMessages() {
-    if (!compactReportsEnabled()) return legacyRefinePromptMessages();
+    if (!compactReportsEnabled()) {
+        const messages = legacyRefinePromptMessages();
+        if (!Object.values(sceneCollectionFields(getSettings())).every(Boolean)) messages[0].content = selectedLegacyReportLines(true).join('\n');
+        return messages;
+    }
     const settings = getSettings();
     const preferenceText = settings.cardLinkEnabled && settings.nextBeatHints ? cardLinkPreferenceText() : '';
     return [
@@ -4748,6 +4836,7 @@ function refinePromptMessages() {
     ];
 }
 function saveSharedCompact(message, raw) {
+    if (isFullyArmed()) raw = filterSceneCollection(raw, getSettings());
     if (!message || raw?._v !== 2 || !sanitizeState(raw)) return null;
     message.extra ??= {};
     const store = message.extra[SHARED_REPORT_KEY] ??= { swipes: {} };
@@ -4795,6 +4884,7 @@ function receiveCompactRepair(raw, message) {
     persistChat(); saveChatMeta();
 }
 function publishCompactRepair(raw, message) {
+    raw = filterSceneCollection(raw, getSettings());
     if (!raw) return;
     saveSharedCompact(message, raw);
     takeCompactState(message, raw);

@@ -45,7 +45,7 @@ function combined(r){return Object.values(r.prompts).join('\n');}
 function schemas(r){return [...combined(r).matchAll(/<(sfw_scene|scene_state)>({[^\n]+})<\/\1>/g)].map(m=>JSON.parse(m[2]));}
 
 test('embedded shared helpers match their independently tested sources',()=>{
-    for(const file of ['custom-injection.js','slow-burn-turns.js','scene-body.js','body-tokens.js','compact-report.js']){
+    for(const file of ['scene-collection-ui.js','custom-injection.js','slow-burn-turns.js','scene-body.js','body-tokens.js','compact-report.js']){
         const embedded=sources[own].split(`// BEGIN ${file}\n`)[1].split(`\n// END ${file}`)[0];
         assert.equal(embedded,fs.readFileSync(new URL('../'+file,import.meta.url),'utf8').replaceAll('export function ','function '));
     }
@@ -156,4 +156,41 @@ test('partial report during main generation cannot be saved through common-state
     const r=setup({mode:own==='nsfw'?'manual':'auto'}),m=msg(own==='nsfw'?8:0);r.context.chat.push(m);
     r.api.beginSceneGeneration('normal',true);assert.equal(r.api.sharedCompactReport(m),null);assert.equal(m.extra.ttottoCompactScene,undefined);
     r.api.finishSceneGeneration('normal');r.collect();assert.ok(m.extra.ttottoCompactScene);
+});
+
+test('selective descriptors affect schema, saved report, cached prompt and repair; controls remain', async()=>{
+    const r=setup({mode:'manual',autoRefine:true,slow:true});
+    r.api.getSettings().sceneCollection={enabled:false};
+    r.prepare();
+    const schema=schemas(r)[0];
+    assert.equal(schema.scene.location,undefined);assert.equal(schema.scene.characters,undefined);
+    assert.equal(schema.heat,0);assert.equal(schema.stage,1);assert.ok(schema.scene.acts);
+    const m=msg(8,'scene_state');r.context.chat.push(m);r.collect();
+    assert.equal(r.api.effectiveState().state.location,undefined);
+    assert.doesNotMatch(JSON.stringify(m.extra),/이야기 속 저녁|피곤함|코트/);
+    r.prepare();assert.doesNotMatch(combined(r),/이야기 속 저녁|피곤함|코트/);
+    // The automatic timer must not be scheduled for intentionally absent facts.
+    assert.equal(r.timers.size,0);assert.equal(r.calls,0);
+    assert.equal(await r.api.runRefine({manual:true}),true);
+    assert.equal(r.calls,1);assert.doesNotMatch(JSON.stringify(m.extra),/이야기 속 저녁|피곤함|코트/);
+    assert.equal(r.api.effectiveState().state.heat,8);
+});
+test('turning off selected fields masks existing history without deleting it; re-enable restores valid facts',()=>{
+    const r=setup({mode:'manual'}),m=msg(8,'scene_state');r.context.chat.push(m);r.collect();
+    const before=JSON.stringify(m.extra);
+    r.api.getSettings().sceneCollection={fields:{location:false,appearance:false,time:false}};
+    r.prepare();assert.doesNotMatch(combined(r),/이야기 속 저녁|코트/);
+    assert.equal(r.api.effectiveState().state.location,undefined);
+    assert.equal(r.api.effectiveState().state.characters.A.position.ko,'의자');
+    assert.equal(JSON.stringify(m.extra),before);
+    r.api.getSettings().sceneCollection={};
+    assert.equal(r.api.effectiveState().state.location.ko,'방');
+    r.prepare();assert.match(combined(r),/이야기 속 저녁|코트/);
+});
+test('legacy peer respects disabled descriptions in both generation and repair schemas',()=>{
+    const r=setup({legacyPeer:true,mode:'manual'});
+    r.api.getSettings().sceneCollection={enabled:false};r.prepare();
+    const schema=schemas(r)[0];assert.equal(schema._v,undefined);assert.equal(schema.location,undefined);
+    assert.deepEqual(Object.keys(schema.characters),[]);assert.equal(schema.heat,0);
+    assert.doesNotMatch(r.api.refinePromptMessages()[0].content, /current clothing|current posture|Always report location/);
 });
