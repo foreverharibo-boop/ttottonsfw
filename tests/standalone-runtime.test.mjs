@@ -194,3 +194,33 @@ test('legacy peer respects disabled descriptions in both generation and repair s
     assert.deepEqual(Object.keys(schema.characters),[]);assert.equal(schema.heat,0);
     assert.doesNotMatch(r.api.refinePromptMessages()[0].content, /current clothing|current posture|Always report location/);
 });
+
+test('CardInject reply and candidate purposes are independent; disabled source categories still work once',()=>{
+ const r=setup({mode:own==='nsfw'?'manual':'auto'});
+ r.context.characterId=0;r.context.characters=[{name:'A',avatar:'a.png'},{name:'A',avatar:'b.png'}];r.context.name1='Reader';
+ r.context.extensionSettings.cardinject={perChar:{'a.png':{categories:[{key:'selected',name:'Traits',enabled:false,content:'{{char}} CARD_REFERENCE_MARKER {{user}}'},{key:'other',name:'Other',enabled:true,content:'UNSELECTED_CARD_MARKER'}]},'b.png':{categories:[{key:'selected',name:'Traits',enabled:false,content:'OTHER_CHARACTER_MARKER'}]}}};
+ const settings=r.api.getSettings();Object.assign(settings,{cardLinkEnabled:true,cardLinkSelected:{'a.png':['selected']}});
+ assert.equal(settings.cardLinkUseReply,true);assert.equal(settings.cardLinkUseNext,true);
+ for(const reply of [false,true])for(const next of [false,true])for(const hints of [false,true]){
+  Object.assign(settings,{cardLinkUseReply:reply,cardLinkUseNext:next,nextBeatHints:hints});r.prepare();
+  const prompt=combined(r);assert.equal((prompt.match(/CARD_REFERENCE_MARKER/g)??[]).length,reply||next&&hints?1:0);
+  assert.equal(prompt.includes('CHARACTER SHEET CONTEXT'),reply);
+  assert.doesNotMatch(prompt,/UNSELECTED_CARD_MARKER|OTHER_CHARACTER_MARKER|\{\{char\}\}/);
+  assert.equal(JSON.stringify(r.api.refinePromptMessages()).includes('CARD_REFERENCE_MARKER'),next&&hints);
+ }
+ assert.equal(r.calls,0);
+ Object.assign(settings,{cardLinkUseReply:true,cardLinkUseNext:true,nextBeatHints:true});
+ r.context.characterId=1;r.prepare();assert.doesNotMatch(combined(r),/CARD_REFERENCE_MARKER|OTHER_CHARACTER_MARKER/);
+ r.context.characterId=0;settings.cardLinkEnabled=false;r.prepare();assert.doesNotMatch(combined(r),/CARD_REFERENCE_MARKER/);
+ settings.cardLinkEnabled=true;settings.enabled=false;r.prepare();assert.doesNotMatch(combined(r),/CARD_REFERENCE_MARKER/);
+});
+test('reply-only CardInject is omitted from legacy auxiliary prompts and remains during a target scene',()=>{
+ const r=setup({mode:own==='nsfw'?'manual':'auto',legacyPeer:true});
+ r.context.characterId=0;r.context.characters=[{name:'A',avatar:'a.png'}];
+ r.context.extensionSettings.cardinject={perChar:{'a.png':{categories:[{key:'t',name:'Traits',enabled:false,content:'TARGET_CARD_MARKER'}]}}};
+ const settings=r.api.getSettings();Object.assign(settings,{cardLinkEnabled:true,cardLinkSelected:{'a.png':['t']},cardLinkUseReply:true,cardLinkUseNext:false,nextBeatHints:false});
+ r.prepare();assert.match(combined(r),/TARGET_CARD_MARKER/);assert.doesNotMatch(JSON.stringify(r.api.refinePromptMessages()),/TARGET_CARD_MARKER/);
+ Object.assign(settings,{developerMode:true,cardLinkUseNext:true,nextBeatHints:true});
+ const meta=r.api.getChatMeta();Object.assign(meta,{slowBurnTargetActive:true,slowBurnTarget:'TARGET_ACTION',slowBurnSessionActive:true});
+ r.prepare();assert.match(combined(r),/TARGET_CARD_MARKER/);assert.doesNotMatch(JSON.stringify(r.api.refinePromptMessages()),/TARGET_CARD_MARKER/);
+});
