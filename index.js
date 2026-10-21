@@ -1,3 +1,55 @@
+// BEGIN scene-field-size.js
+// Only collected state fields grow; custom prompts and other editors are unchanged.
+const sceneFieldSizes = new WeakMap();
+const observedSceneFields = new Set();
+let sceneFieldObserver = null;
+let sceneFieldResizeBound = false;
+function resizeSceneField(field) {
+    if (!field?.getClientRects?.().length || !field.clientWidth) {
+        if (field) sceneFieldSizes.set(field, 0);
+        return;
+    }
+    const style = globalThis.getComputedStyle?.(field);
+    const border = (parseFloat(style?.borderTopWidth) || 0) + (parseFloat(style?.borderBottomWidth) || 0);
+    const previous = field.style.height;
+    // Preserve the page's scroll anchor while measuring a potentially shorter value.
+    const parent = field.parentElement;
+    const minHeight = parent?.style.minHeight;
+    if (parent) parent.style.minHeight = `${parent.getBoundingClientRect().height}px`;
+    field.style.height = 'auto';
+    const height = `${Math.ceil(field.scrollHeight + border)}px`;
+    field.style.height = height;
+    if (parent) parent.style.minHeight = minHeight;
+    sceneFieldSizes.set(field, field.clientWidth);
+    return height !== previous;
+}
+function autoSizeSceneFields(root = document) {
+    if (!root?.querySelectorAll) return;
+    if (!sceneFieldObserver && typeof ResizeObserver !== 'undefined') {
+        sceneFieldObserver = new ResizeObserver(entries => {
+            for (const { target } of entries) {
+                if (!target.getClientRects().length || sceneFieldSizes.get(target) !== target.clientWidth) resizeSceneField(target);
+            }
+        });
+    }
+    if (!sceneFieldResizeBound) {
+        globalThis.addEventListener?.('resize', () => autoSizeSceneFields());
+        sceneFieldResizeBound = true;
+    }
+    for (const old of observedSceneFields) if (!old.isConnected) {
+        sceneFieldObserver?.unobserve(old); observedSceneFields.delete(old);
+    }
+    for (const field of root.querySelectorAll('textarea.ttotto-scene-textarea')) {
+        if (!observedSceneFields.has(field)) {
+            observedSceneFields.add(field);
+            field.addEventListener('input', () => resizeSceneField(field));
+            sceneFieldObserver?.observe(field);
+        }
+        resizeSceneField(field);
+    }
+}
+
+// END scene-field-size.js
 // BEGIN scene-collection-ui.js
 // Global NSFW description settings, independent of custom prompt scopes.
 function renderSceneCollectionUi() {
@@ -475,7 +527,7 @@ function compactReportLines(kind, options, { repair = false, heatRules = [], sta
     if (active.dialogueBeatGuard || (options.sfwEnabled && sfw.dialogueBeatGuard)) scene.dialogue_beats = [];
     if (sfw.dialogueFlow) scene.dialogue_flow = { topic: '', last_question: '', new_facts: [] };
     if (active.nextBeatHints || (options.sfwEnabled && sfw.nextBeatHints)) scene.next = [];
-    const selected = kind === 'nsfw' ? filterSceneCollection(scene, nsfw) : scene;
+    const selected = filterSceneCollection(scene, active);
     if (selected.characters && !Object.keys(selected.characters).length) delete selected.characters;
     const record = { _v: 2, scene: selected, ...(heat ? { heat: 0 } : {}) };
     if (kind === 'nsfw' && nsfw.slowBurnEnabled) record.stage = 1;
@@ -485,7 +537,7 @@ function compactReportLines(kind, options, { repair = false, heatRules = [], sta
             : 'STATE REPORT: End your response with exactly one state block (single-line JSON, hidden from the reader). No other scene report:',
         repair ? JSON.stringify(record) : `<${tag}>${JSON.stringify(record)}</${tag}>`,
         'Write descriptive values concisely in Korean only; keep JSON keys, enum values and character names unchanged. Do not add English translations. This language rule applies ONLY to the record, not the story.',
-        kind === 'sfw' ? 'Record facts at the END of the reply. Include every present character and relevant object, including unchanged facts. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.' : 'Record facts at the END of the reply using ONLY the fields in this schema. Omit disabled fields entirely; do not relocate their descriptions into other fields. For selected fields, include unchanged facts and every relevant character/object. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
+        'Record facts at the END of the reply using ONLY the fields in this schema. Omit disabled fields entirely; do not relocate their descriptions into other fields. For selected fields, include unchanged facts and every relevant character/object. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
         ...('time' in selected ? ['Use RP time only, never the real date/clock. Preserve explicit in-story date/time (including Info_panel); otherwise keep established time context without inventing a clock time.'] : []),
         'scene_type: general/daily/conversation/romance/conflict/action/investigation; keep it unless the dominant scene changes. intensity: narrative tension 0-10, not sexual heat.',
         ...(scene.stage !== undefined ? ['scene.stage: observed narrative progression 1 setup, 2 engagement, 3 first development, 4 deepening, 5 decisive turn, 6 resolution; not sexual stage or permission to finish.'] : []),
@@ -662,7 +714,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.31';
+const EXTENSION_VERSION = '0.13.35';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -3812,9 +3864,9 @@ function renderStatePanel() {
             wrap.className = 'tns-char-field';
             const caption = document.createElement('span');
             caption.textContent = label;
-            const input = document.createElement('input');
-            input.type = 'text';
-            input.className = 'text_pole';
+            const input = document.createElement('textarea');
+            input.rows = 1;
+            input.className = 'text_pole ttotto-scene-textarea';
             input.value = biText(info[field]);
             input.addEventListener('change', () => {
                 applyManualEdit((draft) => {
@@ -4127,6 +4179,7 @@ function updateUi() {
         element('tns-refine').title = '선택한 보정 연결로 최신 답변을 분석합니다. 추가 AI 호출 비용이 발생합니다.';
         element('tns-force-arm-label').textContent = isFullyArmed() ? '개입 해제' : '지금 개입';
         renderStatePanel();
+        autoSizeSceneFields();
 
         const preview = element('tns-prompt-preview');
         if (!preview.hidden) {
