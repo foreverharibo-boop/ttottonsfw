@@ -56,6 +56,8 @@ function renderSceneCollectionUi() {
     const settings = getSettings(), config = settings.sceneCollection ?? {};
     const master = element('tns-scene-collection-enabled');
     if (!master) return;
+    const language = element('tns-scene-record-language');
+    if (language) language.value = config.language === 'en' ? 'en' : 'ko';
     master.checked = config.enabled !== false;
     for (const key of Object.keys(sceneCollectionFields())) {
         const input = element(`tns-scene-collect-${key}`);
@@ -65,6 +67,14 @@ function renderSceneCollectionUi() {
     }
 }
 function bindSceneCollectionUi() {
+    element('tns-scene-record-language')?.addEventListener('change', event => {
+        const value = event.target.value;
+        if (!['ko', 'en'].includes(value)) return;
+        (getSettings().sceneCollection ??= {}).language = value;
+        getContext().saveSettingsDebounced?.();
+        clearInjectedPrompt();
+        updateUi();
+    });
     for (const key of ['enabled', ...Object.keys(sceneCollectionFields())]) {
         const input = element(key === 'enabled' ? 'tns-scene-collection-enabled' : `tns-scene-collect-${key}`);
         input?.addEventListener('change', () => {
@@ -143,7 +153,7 @@ function customInjectionCharacters() {
             Object.defineProperty(registry.byAvatar, avatar, { value: uuid, writable: true, enumerable: true, configurable: true });
             changed = true;
         }
-        entries.push({ uuid, avatar, name: String(card.name || card.data?.name || '이름 없는 캐릭터') });
+        entries.push({ uuid, avatar, name: String(card.name || card.data?.name || 'Unnamed Character') });
     }
     if (changed) context.saveSettingsDebounced?.();
     return entries;
@@ -173,17 +183,17 @@ function buildCustomInjectionLines() {
     if (!entries.length) return [];
     const store = customInjectionStore(), lines = [];
     for (const field of CUSTOM_FIELDS) {
-        const title = field === 'prompt' ? '추가 프롬프트' : '킨크 참고';
+        const title = field === 'prompt' ? 'Additional Instructions' : 'Kink Preferences';
         const common = entries.filter(entry => customInjectionScope(customInjectionProfile(entry.uuid), field) === 'common');
         const text = customInjectionText(store.common, field).trim();
         if (common.length && text) {
-            lines.push('', `[${title} · 공통 · 대상: ${common.map(entry => `${entry.name} (${entry.avatar})`).join(', ')}]`, text);
+            lines.push('', `[${title}${entries.length > 1 ? ' — ' + common.map(entry => `${entry.name} (${entry.avatar})`).join(', ') : ''}]`, text);
         }
         for (const entry of entries) {
             const profile = customInjectionProfile(entry.uuid);
             const text = customInjectionText(profile, field).trim();
             if (customInjectionScope(profile, field) === 'character' && text) {
-                lines.push('', `[${title} · ${entry.name} (${entry.avatar})]`, text);
+                lines.push('', `[${title}${entries.length > 1 ? ` — ${entry.name} (${entry.avatar})` : ''}]`, text);
             }
         }
     }
@@ -458,6 +468,16 @@ function createBodyTokenCounter({ raw, ready, allowed, epoch, swipe, save, recor
 // END body-tokens.js
 
 // BEGIN compact-report.js
+// Select the language of newly requested record values; never translate saved/user text.
+function sceneRecordLanguage(settings = {}) {
+    return settings.sceneCollection?.language === 'en' ? 'English' : 'Korean';
+}
+
+function applySceneReportLanguage(text, settings = {}) {
+    return text.replaceAll('Korean only', `${sceneRecordLanguage(settings)} only`)
+        .replaceAll('Do not add English translations.', 'Do not add translations.');
+}
+
 // Scene descriptions are optional; control/history fields are never masked.
 function sceneCollectionFields(settings = {}) {
     const config = settings.sceneCollection ?? {};
@@ -536,7 +556,7 @@ function compactReportLines(kind, options, { repair = false, heatRules = [], sta
         repair ? 'Read the RP log and return ONLY one JSON object matching this schema:'
             : 'STATE REPORT: End your response with exactly one state block (single-line JSON, hidden from the reader). No other scene report:',
         repair ? JSON.stringify(record) : `<${tag}>${JSON.stringify(record)}</${tag}>`,
-        'Write descriptive values concisely in Korean only; keep JSON keys, enum values and character names unchanged. Do not add English translations. This language rule applies ONLY to the record, not the story.',
+        `Write descriptive values concisely in ${sceneRecordLanguage(active)} only; keep JSON keys, enum values and character names unchanged. Do not add translations. This language rule applies ONLY to the record, not the story.`,
         'Record facts at the END of the reply using ONLY the fields in this schema. Omit disabled fields entirely; do not relocate their descriptions into other fields. For selected fields, include unchanged facts and every relevant character/object. Unknown values stay empty; never invent facts or write unchanged/no_change acknowledgements. Escape quotes and line breaks. Bookkeeping must not change the story.',
         ...('time' in selected ? ['Use RP time only, never the real date/clock. Preserve explicit in-story date/time (including Info_panel); otherwise keep established time context without inventing a clock time.'] : []),
         'scene_type: general/daily/conversation/romance/conflict/action/investigation; keep it unless the dominant scene changes. intensity: narrative tension 0-10, not sexual heat.',
@@ -714,7 +734,7 @@ const PROMPT_KEY = 'ttotto_nsfw_continuity';
 const CHAT_STATE_KEY = 'ttottoNsfw';
 const MESSAGE_EXTRA_KEY = 'ttottoNsfw';
 const LOG_PREFIX = '[🔞또또NSFW]';
-const EXTENSION_VERSION = '0.13.37';
+const EXTENSION_VERSION = '0.13.38';
 const CHAT_STATE_SCHEMA_VERSION = 1;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 const DEVELOPER_UNLOCK_TAPS = 7;
@@ -2893,7 +2913,7 @@ function buildSlowBurnLines(settings) {
 
 const STATE_REPORT_LINES = [
     'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
-    '<scene_state>{"_status":"updated","location":"Korean only","characters":{"이름":{"clothing":"current clothing state, Korean only","position":"current posture/position, Korean only","contact":"current physical contact, Korean only"}},"acts":["2-4 significant new beats in this response, each \'Korean only\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'Korean only\'"]}</scene_state>',
+    '<scene_state>{"_status":"updated","location":"Korean only","characters":{"name":{"clothing":"current clothing state, Korean only","position":"current posture/position, Korean only","contact":"current physical contact, Korean only"}},"acts":["2-4 significant new beats in this response, each \'Korean only\'"],"heat":0,"next":["2-3 fresh beats the scene could move to next, each \'Korean only\'"]}</scene_state>',
     'Write descriptive values concisely in Korean only; keep keys and character names unchanged. This applies only to the report, not the story. Use the same character names as in the chat.',
     '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
     ...HEAT_SCALE_LINES,
@@ -2904,7 +2924,7 @@ const STATE_REPORT_LINES = [
 
 const SLOW_BURN_STATE_REPORT_LINES = [
     'STATE REPORT: End your response with exactly one state block in this format (single line, valid JSON). It is machine-read and hidden from the reader — include it every time:',
-    '<scene_state>{"_status":"updated","location":"Korean only","characters":{"이름":{"clothing":"current clothing state, Korean only","position":"current posture/position, Korean only","contact":"current physical contact, Korean only"}},"acts":["2-4 significant new beats in this response, each \'Korean only\'"],"heat":0,"stage":1,"next":["2-3 fresh beats the scene could move to next, each \'Korean only\'"]}</scene_state>',
+    '<scene_state>{"_status":"updated","location":"Korean only","characters":{"name":{"clothing":"current clothing state, Korean only","position":"current posture/position, Korean only","contact":"current physical contact, Korean only"}},"acts":["2-4 significant new beats in this response, each \'Korean only\'"],"heat":0,"stage":1,"next":["2-3 fresh beats the scene could move to next, each \'Korean only\'"]}</scene_state>',
     'Write descriptive values concisely in Korean only; keep keys and character names unchanged. This applies only to the report, not the story. Use the same character names as in the chat.',
     '"acts" rules: list ONLY substantive beats — physical/romantic/emotional developments that matter for repetition control. Skip mundane logistics (snacks, drinks, blankets, remote controls, small housekeeping actions). 2-4 items maximum, only what is NEW in this response.',
     ...HEAT_SCALE_LINES,
@@ -4888,7 +4908,7 @@ function selectedLegacyReportLines(repair = false, nextGuidance = '') {
 }
 function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuidance = '') {
     if (!compactReportsEnabled()) return Object.values(sceneCollectionFields(getSettings())).every(Boolean)
-        ? legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance) : selectedLegacyReportLines(false, nextGuidance);
+        ? legacyStateReportLines(settingsOrSlowBurn, dialogueOrGuidance, nextGuidance).map(line => applySceneReportLanguage(line, getSettings())) : selectedLegacyReportLines(false, nextGuidance);
     return compactReportLines(STANDALONE_KIND, standaloneReportOptions(), {
         heatRules: standaloneHeatRules(),
         stageRules: STANDALONE_KIND === 'nsfw' ? SLOW_BURN_STAGE_REPORT_RULES : [],
@@ -4898,6 +4918,7 @@ function stateReportLines(settingsOrSlowBurn, dialogueOrGuidance = '', nextGuida
 function refinePromptMessages() {
     if (!compactReportsEnabled()) {
         const messages = legacyRefinePromptMessages();
+        messages[0].content = applySceneReportLanguage(messages[0].content, getSettings());
         if (!Object.values(sceneCollectionFields(getSettings())).every(Boolean)) messages[0].content = selectedLegacyReportLines(true).join('\n');
         return messages;
     }
