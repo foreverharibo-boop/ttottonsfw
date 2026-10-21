@@ -45,10 +45,28 @@ function combined(r){return Object.values(r.prompts).join('\n');}
 function schemas(r){return [...combined(r).matchAll(/<(sfw_scene|scene_state)>({[^\n]+})<\/\1>/g)].map(m=>JSON.parse(m[2]));}
 
 test('embedded shared helpers match their independently tested sources',()=>{
-    for(const file of ['slow-burn-turns.js','scene-body.js','body-tokens.js','compact-report.js']){
+    for(const file of ['custom-injection.js','slow-burn-turns.js','scene-body.js','body-tokens.js','compact-report.js']){
         const embedded=sources[own].split(`// BEGIN ${file}\n`)[1].split(`\n// END ${file}`)[0];
         assert.equal(embedded,fs.readFileSync(new URL('../'+file,import.meta.url),'utf8').replaceAll('export function ','function '));
     }
+});
+
+test('custom prompt and kinks follow the NSFW gate and never enter the auxiliary analysis request',()=>{
+    const r=setup({mode:'manual'});
+    r.context.characterId=0;
+    r.context.characters=[{name:'Same',avatar:'a.png'},{name:'Same',avatar:'b.png'}];
+    r.api.getSettings().customInjection={common:{prompt:'CUSTOM-PROMPT',kinks:'CUSTOM-KINK'},characters:{}};
+    r.prepare();
+    assert.match(combined(r),/CUSTOM-PROMPT/);assert.match(combined(r),/CUSTOM-KINK/);
+    assert.equal((combined(r).match(/CUSTOM-PROMPT/g)??[]).length,1);
+    assert.doesNotMatch(JSON.stringify(r.api.refinePromptMessages()),/CUSTOM-PROMPT|CUSTOM-KINK/);
+    r.api.getSettings().armMode='stealth';r.prepare();
+    assert.doesNotMatch(combined(r),/CUSTOM-PROMPT|CUSTOM-KINK/);
+    r.api.getSettings().armMode='manual';r.api.getSettings().enabled=false;r.prepare();
+    assert.doesNotMatch(combined(r),/CUSTOM-PROMPT|CUSTOM-KINK/);
+    r.api.getSettings().enabled=true;r.api.getChatMeta().enabled=false;r.prepare();
+    assert.doesNotMatch(combined(r),/CUSTOM-PROMPT|CUSTOM-KINK/);
+    assert.equal(r.calls,0);
 });
 test('standalone uses Korean compact records, preserves legacy records, and needs no peer',()=>{
     const r=setup({mode:own==='nsfw'?'manual':'auto',slow:true});r.prepare();
